@@ -90,6 +90,8 @@ python3 snyk_sca_validator.py --snyk-token YOUR_SNYK_TOKEN --dry-run
 | `--output-report` | Custom report filename | No | Auto-generated |
 | `--dry-run` | Simulation mode (no API calls) | No | False |
 | `--verbose` | Detailed output | No | False |
+| `--debug` | Enable debug logging for troubleshooting repository mapping issues | No | False |
+| `--list-orgs` | List all accessible organizations and exit | No | False |
 
 ## Supported Snyk Regions
 
@@ -145,6 +147,26 @@ Contains a human-readable summary including:
 3. **Parse URLs**: Extracts repository information from target URLs
 4. **Validate Files**: Checks if Snyk-tracked files exist in the actual repositories
 5. **Generate Reports**: Creates detailed CSV and text reports
+
+## Debug Logging
+
+The `--debug` flag enables comprehensive debug logging to help troubleshoot repository mapping issues. When enabled, the script will log:
+
+- **URL Parsing**: Detailed information about how repository URLs are parsed and which patterns match/fail
+- **Repository Mapping**: Shows the mapping from Snyk target URLs to parsed repository information
+- **API Calls**: Complete request/response details for all API calls to Snyk, GitLab, GitHub, and Bitbucket
+- **File Validation**: Shows which repository each file validation is being performed against
+- **Missing File Detection**: Details about what files are found in repos vs. what Snyk is tracking
+
+Example debug output:
+```
+[14:23:45.123] 🔍 DEBUG: Parsing URL: https://gitlab.com/owner/repo
+[14:23:45.124] 🔍 DEBUG: GitLab pattern 1 match result: True
+[14:23:45.125] 🔍 DEBUG: Successfully parsed URL - Platform: gitlab, Owner: owner, Repo: repo
+[14:23:45.126] 🔍 DEBUG: Repository mapping successful
+[14:23:45.127] 🔍 DEBUG: Mapped to platform: gitlab
+[14:23:45.128] 🔍 DEBUG: API Request - URL: https://api.gitlab.com/api/v4/projects/owner%2Frepo
+```
 
 ## Error Handling
 
@@ -206,13 +228,56 @@ Identify discrepancies between Snyk project configurations and actual repository
 
 This project is licensed under the MIT License - see the LICENSE file for details.
 
+## Troubleshooting
+
+### Common Issues
+
+#### 404 Organization Not Found
+If you get a 404 error when trying to access an organization:
+
+```bash
+Error validating organization 03c78318-dfc6-4b48-9fd4-76a8254aa225: 404 Client Error: Not Found
+```
+
+This usually means:
+1. **Invalid Organization ID** - The organization ID doesn't exist
+2. **Access Denied** - Your token doesn't have access to this organization
+3. **Organization Deleted** - The organization was deleted or moved
+
+**Solutions:**
+1. **List accessible organizations:**
+   ```bash
+   python3 snyk_sca_validator.py --snyk-token YOUR_TOKEN --list-orgs
+   ```
+
+2. **Use debug mode to see detailed error information:**
+   ```bash
+   python3 snyk_sca_validator.py --snyk-token YOUR_TOKEN --org-id ORG_ID --debug
+   ```
+
+3. **Verify your token has the correct permissions** - Check that your Snyk token has access to the organization you're trying to validate
+
+#### Authentication Issues
+If you get 401 or 403 errors:
+- Verify your Snyk token is valid and not expired
+- Check that your token has the necessary permissions
+- Ensure you're using the correct Snyk region
+
+#### Repository Access Issues
+If repository files can't be accessed:
+- For private GitLab repositories, provide a GitLab token: `--gitlab-token YOUR_GITLAB_TOKEN`
+- For custom GitLab instances, specify the URL: `--gitlab-url https://gitlab.company.com`
+- Use debug mode to see detailed API call information
+
 ## Support
 
 For issues and questions:
 1. Check the error messages in the output
-2. Verify your API tokens have the correct permissions
-3. Ensure repository URLs are accessible
-4. Check network connectivity and API rate limits
+2. Use `--debug` flag for detailed troubleshooting information
+3. Use `--list-orgs` to verify accessible organizations
+4. Verify your API tokens have the correct permissions
+5. Ensure repository URLs are accessible
+6. Check network connectivity and API rate limits
 
 ## Changelog
 

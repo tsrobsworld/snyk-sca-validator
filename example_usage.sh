@@ -50,6 +50,16 @@ echo "Example 8: Verbose output"
 echo "Command: python3 snyk_sca_validator.py --snyk-token \$SNYK_TOKEN --verbose"
 echo ""
 
+# Example 9: Debug logging
+echo "Example 9: Debug logging for troubleshooting"
+echo "Command: python3 snyk_sca_validator.py --snyk-token \$SNYK_TOKEN --debug"
+echo ""
+
+# Example 10: List accessible organizations
+echo "Example 10: List accessible organizations"
+echo "Command: python3 snyk_sca_validator.py --snyk-token \$SNYK_TOKEN --list-orgs"
+echo ""
+
 echo "To run any of these examples:"
 echo "1. Set your API tokens in the environment variables above"
 echo "2. Uncomment and run the desired command"
@@ -65,3 +75,5 @@ echo ""
 # python3 snyk_sca_validator.py --snyk-token $SNYK_TOKEN --output-csv my_results.csv --output-report my_report.txt
 # python3 snyk_sca_validator.py --snyk-token $SNYK_TOKEN --snyk-region SNYK-EU-01
 # python3 snyk_sca_validator.py --snyk-token $SNYK_TOKEN --verbose
+# python3 snyk_sca_validator.py --snyk-token $SNYK_TOKEN --debug
+# python3 snyk_sca_validator.py --snyk-token $SNYK_TOKEN --list-orgs

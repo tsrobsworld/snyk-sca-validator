@@ -31,12 +31,20 @@ from typing import Dict, List, Optional, Tuple, Set
 from urllib.parse import urlparse
 
 
+def debug_log(message: str, debug_enabled: bool = False):
+    """Helper function for debug logging."""
+    if debug_enabled:
+        timestamp = datetime.now().strftime('%H:%M:%S.%f')[:-3]
+        print(f"[{timestamp}] 🔍 DEBUG: {message}")
+
+
 class SnykAPI:
     """Snyk API client for managing organizations, targets, and projects."""
 
-    def __init__(self, token: str, region: str = "SNYK-US-01"):
+    def __init__(self, token: str, region: str = "SNYK-US-01", debug: bool = False):
         self.token = token
         self.base_url = self._get_base_url(region)
+        self.debug = debug
         self.session = requests.Session()
         self.session.headers.update({
             'Authorization': f'token {token}',
@@ -78,7 +86,13 @@ class SnykAPI:
 
         while next_url:
             print(f"   📄 Fetching organizations page {page}...")
+            debug_log(f"API Request - URL: {next_url}", self.debug)
+            debug_log(f"API Request - Params: {next_params}", self.debug)
             response = self.session.get(next_url, params=next_params)
+            debug_log(f"API Response - Status: {response.status_code}", self.debug)
+            debug_log(f"API Response - Headers: {dict(response.headers)}", self.debug)
+            if response.status_code != 200:
+                debug_log(f"API Response - Error body: {response.text}", self.debug)
             response.raise_for_status()
             data = response.json()
 
@@ -105,6 +119,77 @@ class SnykAPI:
         print(f"   ✅ Found {len(all_orgs)} organizations")
         return all_orgs
 
+    def validate_organization_access(self, org_id: str, version: str = "2024-10-15") -> bool:
+        """
+        Validate if the organization exists and is accessible.
+
+        Args:
+            org_id: Organization ID to validate
+            version: API version
+
+        Returns:
+            True if organization is accessible, False otherwise
+        """
+        debug_log(f"Validating access to organization {org_id}", self.debug)
+        
+        # Try multiple API versions if the first one fails
+        api_versions = [version, "2023-05-29", "2023-06-12", "2023-08-14", "2023-10-16"]
+        
+        for api_version in api_versions:
+            try:
+                url = f"{self.base_url}/rest/orgs/{org_id}"
+                params = {'version': api_version}
+                
+                debug_log(f"API Request - URL: {url}", self.debug)
+                debug_log(f"API Request - Params: {params}", self.debug)
+                
+                response = self.session.get(url, params=params)
+                
+                # Debug: Check the actual URL that was called
+                debug_log(f"Actual URL called: {response.url}", self.debug)
+                debug_log(f"API Response - Status: {response.status_code}", self.debug)
+                debug_log(f"API Response - Headers: {dict(response.headers)}", self.debug)
+                
+                if response.status_code == 200:
+                    debug_log(f"Organization {org_id} is accessible with API version {api_version}", self.debug)
+                    print(f"   ✅ Organization {org_id} accessible with API version {api_version}")
+                    return True
+                elif response.status_code == 404:
+                    debug_log(f"Organization {org_id} not found with API version {api_version}", self.debug)
+                    if api_version == api_versions[-1]:  # Last version tried
+                        print(f"   ❌ Organization {org_id} not found with any API version")
+                        return False
+                    else:
+                        debug_log(f"Trying next API version...", self.debug)
+                        continue
+                elif response.status_code == 403:
+                    print(f"   ❌ Access denied to organization {org_id}")
+                    debug_log(f"Access denied to organization {org_id}", self.debug)
+                    return False
+                elif response.status_code == 401:
+                    print(f"   ❌ Authentication failed for organization {org_id}")
+                    debug_log(f"Authentication failed for organization {org_id}", self.debug)
+                    return False
+                else:
+                    debug_log(f"Unexpected response for organization {org_id} with API version {api_version}: {response.status_code}", self.debug)
+                    if api_version == api_versions[-1]:  # Last version tried
+                        print(f"   ⚠️  Unexpected response for organization {org_id}: {response.status_code}")
+                        return False
+                    else:
+                        debug_log(f"Trying next API version...", self.debug)
+                        continue
+                    
+            except Exception as e:
+                debug_log(f"Error validating organization {org_id} with API version {api_version}: {e}", self.debug)
+                if api_version == api_versions[-1]:  # Last version tried
+                    print(f"   ❌ Error validating organization {org_id}: {e}")
+                    return False
+                else:
+                    debug_log(f"Trying next API version...", self.debug)
+                    continue
+        
+        return False
+
     def get_targets_for_org(self, org_id: str, 
                            version: str = "2024-10-15") -> List[Dict]:
         """
@@ -119,6 +204,39 @@ class SnykAPI:
         """
         print(f"🎯 Fetching targets for organization {org_id} (GitLab and CLI only)...")
 
+        # Try multiple API versions if the first one fails
+        api_versions = [version, "2023-05-29", "2023-06-12", "2023-08-14", "2023-10-16"]
+        
+        for api_version in api_versions:
+            try:
+                debug_log(f"Trying API version {api_version} for targets", self.debug)
+                targets = self._get_targets_with_version(org_id, api_version)
+                if targets is not None:
+                    print(f"   ✅ Successfully fetched targets with API version {api_version}")
+                    return targets
+                else:
+                    debug_log(f"Failed to fetch targets with API version {api_version}, trying next...", self.debug)
+                    continue
+            except Exception as e:
+                debug_log(f"Error fetching targets with API version {api_version}: {e}", self.debug)
+                if api_version == api_versions[-1]:  # Last version tried
+                    print(f"   ❌ Failed to fetch targets with any API version")
+                    return []
+                continue
+        
+        return []
+
+    def _get_targets_with_version(self, org_id: str, version: str) -> Optional[List[Dict]]:
+        """
+        Get targets for a specific API version.
+
+        Args:
+            org_id: Organization ID
+            version: API version
+
+        Returns:
+            List of targets or None if failed
+        """
         url = f"{self.base_url}/rest/orgs/{org_id}/targets"
         params = {
             'version': version,
@@ -133,7 +251,25 @@ class SnykAPI:
 
         while next_url:
             print(f"   📄 Fetching targets page {page}...")
+            debug_log(f"API Request - URL: {next_url}", self.debug)
+            debug_log(f"API Request - Params: {next_params}", self.debug)
             response = self.session.get(next_url, params=next_params)
+            debug_log(f"API Response - Status: {response.status_code}", self.debug)
+            debug_log(f"API Response - Headers: {dict(response.headers)}", self.debug)
+            if response.status_code != 200:
+                debug_log(f"API Response - Error body: {response.text}", self.debug)
+                
+            # Handle specific error cases
+            if response.status_code == 404:
+                debug_log(f"Organization {org_id} not found with API version {version}", self.debug)
+                return None
+            elif response.status_code == 403:
+                debug_log(f"Access denied to organization {org_id} with API version {version}", self.debug)
+                return None
+            elif response.status_code == 401:
+                debug_log(f"Authentication failed with API version {version}", self.debug)
+                return None
+            
             response.raise_for_status()
             data = response.json()
 
@@ -189,7 +325,13 @@ class SnykAPI:
 
         while next_url:
             print(f"   📄 Fetching projects page {page}...")
+            debug_log(f"API Request - URL: {next_url}", self.debug)
+            debug_log(f"API Request - Params: {next_params}", self.debug)
             response = self.session.get(next_url, params=next_params)
+            debug_log(f"API Response - Status: {response.status_code}", self.debug)
+            debug_log(f"API Response - Headers: {dict(response.headers)}", self.debug)
+            if response.status_code != 200:
+                debug_log(f"API Response - Error body: {response.text}", self.debug)
             response.raise_for_status()
             data = response.json()
 
@@ -235,20 +377,28 @@ class SnykAPI:
         }
 
         try:
+            debug_log(f"API Request - URL: {url}", self.debug)
+            debug_log(f"API Request - Params: {params}", self.debug)
             response = self.session.get(url, params=params)
+            debug_log(f"API Response - Status: {response.status_code}", self.debug)
+            debug_log(f"API Response - Headers: {dict(response.headers)}", self.debug)
+            if response.status_code != 200:
+                debug_log(f"API Response - Error body: {response.text}", self.debug)
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
             print(f"   ❌ Error fetching project details for {project_id}: {e}")
+            debug_log(f"API Error - Project ID: {project_id}, Error: {e}", self.debug)
             return None
 
 
 class GitLabClient:
     """Client for accessing GitLab repositories."""
 
-    def __init__(self, gitlab_token: Optional[str] = None, gitlab_url: str = "https://gitlab.com"):
+    def __init__(self, gitlab_token: Optional[str] = None, gitlab_url: str = "https://gitlab.com", debug: bool = False):
         self.gitlab_token = gitlab_token
         self.gitlab_url = gitlab_url.rstrip('/')
+        self.debug = debug
         self.session = requests.Session()
         
         if gitlab_token:
@@ -265,12 +415,16 @@ class GitLabClient:
         Returns:
             Dictionary with owner, repo, and branch info or None
         """
+        debug_log(f"Parsing URL: {url}", self.debug)
+        
         if not url:
+            debug_log("URL is empty or None", self.debug)
             return None
 
         # Handle CLI projects with local file paths
         if url.startswith('file://'):
-            return {
+            debug_log("URL type detection - starts with file://", self.debug)
+            result = {
                 'platform': 'local',
                 'host': 'local',
                 'owner': 'local',
@@ -278,10 +432,13 @@ class GitLabClient:
                 'branch': 'main',
                 'is_local': True
             }
+            debug_log(f"Successfully parsed URL - Platform: {result['platform']}, Owner: {result['owner']}, Repo: {result['repo']}", self.debug)
+            return result
         
         # Handle CLI projects with absolute paths
         if url.startswith('/') and not url.startswith('//'):
-            return {
+            debug_log("URL type detection - starts with / (absolute path)", self.debug)
+            result = {
                 'platform': 'local',
                 'host': 'local',
                 'owner': 'local',
@@ -289,13 +446,16 @@ class GitLabClient:
                 'branch': 'main',
                 'is_local': True
             }
+            debug_log(f"Successfully parsed URL - Platform: {result['platform']}, Owner: {result['owner']}, Repo: {result['repo']}", self.debug)
+            return result
 
         # Handle SSH URLs (git@host:owner/repo.git)
         ssh_pattern = r'git@([^:]+):([^/]+)/([^/]+?)(?:\.git)?$'
         ssh_match = re.match(ssh_pattern, url)
+        debug_log(f"SSH pattern match result: {bool(ssh_match)}", self.debug)
         if ssh_match:
             host, owner, repo = ssh_match.groups()
-            return {
+            result = {
                 'platform': 'git' if 'gitlab' in host else 'git',
                 'host': host,
                 'owner': owner,
@@ -303,6 +463,8 @@ class GitLabClient:
                 'branch': 'main',
                 'is_ssh': True
             }
+            debug_log(f"Successfully parsed URL - Platform: {result['platform']}, Owner: {result['owner']}, Repo: {result['repo']}", self.debug)
+            return result
 
         # GitHub URL patterns (for CLI projects that might reference GitHub) - check first
         github_patterns = [
@@ -310,34 +472,40 @@ class GitLabClient:
             r'https?://github\.com/([^/]+)/([^/]+?)(?:\.git)?(?:/blob/([^/]+))?/?$',
         ]
 
-        for pattern in github_patterns:
+        for i, pattern in enumerate(github_patterns):
             match = re.match(pattern, url)
+            debug_log(f"GitHub pattern {i+1} match result: {bool(match)}", self.debug)
             if match:
                 groups = match.groups()
-                return {
+                result = {
                     'platform': 'github',
                     'host': 'github.com',
                     'owner': groups[0],
                     'repo': groups[1],
                     'branch': groups[2] if len(groups) > 2 and groups[2] else 'main'
                 }
+                debug_log(f"Successfully parsed URL - Platform: {result['platform']}, Owner: {result['owner']}, Repo: {result['repo']}", self.debug)
+                return result
 
         # Bitbucket URL patterns (for CLI projects that might reference Bitbucket) - check second
         bitbucket_patterns = [
             r'https?://bitbucket\.org/([^/]+)/([^/]+?)(?:\.git)?(?:/src/([^/]+))?/?$',
         ]
 
-        for pattern in bitbucket_patterns:
+        for i, pattern in enumerate(bitbucket_patterns):
             match = re.match(pattern, url)
+            debug_log(f"Bitbucket pattern {i+1} match result: {bool(match)}", self.debug)
             if match:
                 groups = match.groups()
-                return {
+                result = {
                     'platform': 'bitbucket',
                     'host': 'bitbucket.org',
                     'owner': groups[0],
                     'repo': groups[1],
                     'branch': groups[2] if len(groups) > 2 and groups[2] else 'main'
                 }
+                debug_log(f"Successfully parsed URL - Platform: {result['platform']}, Owner: {result['owner']}, Repo: {result['repo']}", self.debug)
+                return result
 
         # GitLab URL patterns (including new format) - check last to avoid conflicts
         gitlab_patterns = [
@@ -363,6 +531,7 @@ class GitLabClient:
 
         for i, pattern in enumerate(gitlab_patterns):
             match = re.match(pattern, url)
+            debug_log(f"GitLab pattern {i+1} match result: {bool(match)}", self.debug)
             if match:
                 groups = match.groups()
                 if url.startswith('https://gitlab.com/') or url.startswith('http://gitlab.com/'):
@@ -374,13 +543,15 @@ class GitLabClient:
                     has_branch = i in [0, 1, 2, 4, 5, 6, 8, 9, 10]
                     branch = groups[2] if has_branch and len(groups) > 2 and groups[2] else 'main'
                     
-                    return {
+                    result = {
                         'platform': 'gitlab',
                         'host': 'gitlab.com',
                         'owner': full_path,  # Full path including subgroups
                         'repo': repo_name,
                         'branch': branch
                     }
+                    debug_log(f"Successfully parsed URL - Platform: {result['platform']}, Owner: {result['owner']}, Repo: {result['repo']}", self.debug)
+                    return result
                 else:
                     # For custom GitLab instances: groups[0] = host, groups[1] = full path, groups[2] = repo, groups[3] = branch
                     full_path = groups[1]  # e.g., "customer-success-engineers/business"
@@ -390,14 +561,17 @@ class GitLabClient:
                     has_branch = i in [4, 5, 6, 8, 9, 10]
                     branch = groups[3] if has_branch and len(groups) > 3 and groups[3] else 'main'
                     
-                    return {
+                    result = {
                         'platform': 'gitlab',
                         'host': groups[0],
                         'owner': full_path,  # Full path including subgroups
                         'repo': repo_name,
                         'branch': branch
                     }
+                    debug_log(f"Successfully parsed URL - Platform: {result['platform']}, Owner: {result['owner']}, Repo: {result['repo']}", self.debug)
+                    return result
 
+        debug_log(f"Failed to parse URL with any pattern - URL: {url}", self.debug)
         return None
 
     def get_default_branch(self, repo_info: Dict) -> str:
@@ -417,18 +591,27 @@ class GitLabClient:
             try:
                 project_path = f"{repo_info['owner']}%2F{repo_info['repo']}"
                 url = f"{self.gitlab_url}/api/v4/projects/{project_path}"
+                debug_log(f"GitLab API Request - URL: {url}", self.debug)
                 
                 response = self.session.get(url)
+                debug_log(f"GitLab API Response - Status: {response.status_code}", self.debug)
+                debug_log(f"GitLab API Response - Headers: {dict(response.headers)}", self.debug)
+                if response.status_code != 200:
+                    debug_log(f"GitLab API Response - Error body: {response.text}", self.debug)
+                
                 if response.status_code == 200:
                     data = response.json()
                     default_branch = data.get('default_branch', 'main')
                     print(f"   🌿 Using default branch: {default_branch}")
+                    debug_log(f"Successfully retrieved default branch: {default_branch}", self.debug)
                     return default_branch
                 else:
                     print(f"   ⚠️  Could not get default branch, using 'main'")
+                    debug_log(f"Could not get default branch, status: {response.status_code}", self.debug)
                     return 'main'
             except Exception as e:
                 print(f"   ⚠️  Error getting default branch: {e}, using 'main'")
+                debug_log(f"Error getting default branch: {e}", self.debug)
                 return 'main'
         
         # For other platforms, return the branch from repo_info or default to 'main'
@@ -473,8 +656,19 @@ class GitLabClient:
                 params = {
                     'ref': default_branch
                 }
+                debug_log(f"Attempting to access file: {file_path}", self.debug)
+                debug_log(f"Using repository info: {repo_info}", self.debug)
+                debug_log(f"GitLab project path: {project_path}", self.debug)
+                debug_log(f"GitLab default branch: {default_branch}", self.debug)
+                debug_log(f"API URL being called: {url}", self.debug)
+                debug_log(f"API parameters: {params}", self.debug)
 
                 response = self.session.get(url, params=params)
+                debug_log(f"API response status: {response.status_code}", self.debug)
+                debug_log(f"API response headers: {dict(response.headers)}", self.debug)
+                if response.status_code != 200:
+                    debug_log(f"API response error body: {response.text}", self.debug)
+                
                 if response.status_code == 200:
                     return response.text
                 elif response.status_code == 404:
@@ -484,6 +678,7 @@ class GitLabClient:
 
             except Exception as e:
                 print(f"   ❌ Error fetching GitLab file {file_path}: {e}")
+                debug_log(f"Error fetching GitLab file {file_path}: {e}", self.debug)
                 return None
 
         # Handle GitHub repositories (for CLI projects)
@@ -563,8 +758,19 @@ class GitLabClient:
                 params = {
                     'ref': default_branch
                 }
+                debug_log(f"Checking if file exists: {file_path}", self.debug)
+                debug_log(f"Using repository info: {repo_info}", self.debug)
+                debug_log(f"GitLab project path: {project_path}", self.debug)
+                debug_log(f"GitLab default branch: {default_branch}", self.debug)
+                debug_log(f"API URL being called: {url}", self.debug)
+                debug_log(f"API parameters: {params}", self.debug)
 
                 response = self.session.get(url, params=params)
+                debug_log(f"API response status: {response.status_code}", self.debug)
+                debug_log(f"API response headers: {dict(response.headers)}", self.debug)
+                if response.status_code != 200:
+                    debug_log(f"API response error body: {response.text}", self.debug)
+                
                 if response.status_code == 200:
                     return True
                 elif response.status_code == 404:
@@ -574,6 +780,7 @@ class GitLabClient:
 
             except Exception as e:
                 print(f"   ❌ Error checking GitLab file {file_path}: {e}")
+                debug_log(f"Error checking GitLab file {file_path}: {e}", self.debug)
                 return False
 
         # Handle GitHub repositories (for CLI projects)
@@ -709,9 +916,10 @@ class SCAValidator:
         }
     }
 
-    def __init__(self, snyk_api: SnykAPI, gitlab_client: GitLabClient):
+    def __init__(self, snyk_api: SnykAPI, gitlab_client: GitLabClient, debug: bool = False):
         self.snyk_api = snyk_api
         self.gitlab_client = gitlab_client
+        self.debug = debug
         self.validation_results = []
 
     def validate_organization(self, org_id: str) -> Dict:
@@ -725,6 +933,20 @@ class SCAValidator:
             Dictionary with validation results
         """
         print(f"\n🔍 Validating organization {org_id}...")
+
+        # First validate that the organization is accessible
+        if not self.snyk_api.validate_organization_access(org_id):
+            print(f"   ⚠️  Skipping organization {org_id} - not accessible")
+            return {
+                'org_id': org_id,
+                'targets_processed': 0,
+                'projects_processed': 0,
+                'files_validated': 0,
+                'files_missing': 0,
+                'files_present': 0,
+                'targets': [],
+                'error': 'Organization not accessible'
+            }
 
         # Get all targets for the organization
         targets = self.snyk_api.get_targets_for_org(org_id)
@@ -768,11 +990,18 @@ class SCAValidator:
 
         print(f"\n🎯 Validating target: {target_name}")
         print(f"   📍 URL: {target_url}")
+        
+        debug_log(f"Processing target ID: {target_id}", self.debug)
+        debug_log(f"Target attributes: {target_attrs}", self.debug)
+        debug_log(f"Target URL from attributes: {target_url}", self.debug)
+        debug_log(f"Target display name: {target_name}", self.debug)
 
         # Parse repository information
         repo_info = self.gitlab_client.parse_repo_url(target_url)
         if not repo_info:
             print(f"   ⚠️  Could not parse repository URL: {target_url}")
+            debug_log(f"Repository mapping FAILED for URL: {target_url}", self.debug)
+            debug_log(f"This target will be skipped", self.debug)
             return {
                 'target_id': target_id,
                 'target_name': target_name,
@@ -784,6 +1013,13 @@ class SCAValidator:
                 'files_present': 0,
                 'projects': []
             }
+        
+        debug_log(f"Repository mapping successful", self.debug)
+        debug_log(f"Mapped to platform: {repo_info['platform']}", self.debug)
+        debug_log(f"Mapped to host: {repo_info['host']}", self.debug)
+        debug_log(f"Mapped to owner: {repo_info['owner']}", self.debug)
+        debug_log(f"Mapped to repo: {repo_info['repo']}", self.debug)
+        debug_log(f"Mapped to branch: {repo_info['branch']}", self.debug)
 
         print(f"   🔗 Platform: {repo_info['platform']}")
         if repo_info.get('is_local'):
@@ -861,11 +1097,16 @@ class SCAValidator:
         project_type = project_attrs.get('type')
 
         print(f"\n📁 Validating project: {project_name} ({project_type})")
+        
+        debug_log(f"Validating project {project_name} against repository", self.debug)
+        debug_log(f"Project type: {project_type}", self.debug)
+        debug_log(f"Repository being checked: {repo_info['platform']} - {repo_info['owner']}/{repo_info['repo']}", self.debug)
 
         # Get detailed project information
         project_details = self.snyk_api.get_project_details(org_id, project_id)
         if not project_details:
             print(f"   ❌ Could not get project details for {project_id}")
+            debug_log(f"Could not get project details for {project_id}", self.debug)
             return {
                 'project_id': project_id,
                 'project_name': project_name,
@@ -884,6 +1125,9 @@ class SCAValidator:
         # Get the root directory and file paths
         root_dir = project_attributes.get('root', '')
         file_paths = self._extract_file_paths_from_project(project_attributes)
+        
+        debug_log(f"Project root directory: {root_dir}", self.debug)
+        debug_log(f"Files to validate: {file_paths}", self.debug)
 
         project_result = {
             'project_id': project_id,
@@ -1172,6 +1416,10 @@ class SCAValidator:
         """
         print(f"🔍 Scanning repository for supported files...")
         
+        debug_log(f"Scanning repository for supported files", self.debug)
+        debug_log(f"Repository platform: {repo_info['platform']}", self.debug)
+        debug_log(f"Repository path: {repo_info['owner']}/{repo_info['repo']}", self.debug)
+        
         # Get all projects for this target
         projects = self.snyk_api.get_projects_for_target(org_id, target['id'])
         
@@ -1182,14 +1430,20 @@ class SCAValidator:
             for file_path in file_paths:
                 tracked_files.add(file_path)
         
+        debug_log(f"Currently tracked files: {list(tracked_files)}", self.debug)
+        
         # Scan repository for all supported files
         repo_files = self.scan_repository_for_supported_files(repo_info)
+        
+        debug_log(f"Found repository files: {[f['file_path'] for f in repo_files]}", self.debug)
         
         # Find missing files
         missing_files = []
         for repo_file in repo_files:
             if repo_file['file_path'] not in tracked_files:
                 missing_files.append(repo_file)
+        
+        debug_log(f"Missing files: {[f['file_path'] for f in missing_files]}", self.debug)
         
         print(f"   📊 Found {len(repo_files)} supported files in repository")
         print(f"   📊 Currently tracking {len(tracked_files)} files in Snyk")
@@ -1449,6 +1703,8 @@ Examples:
                        help='Specific Snyk organization ID to validate (optional)')
     parser.add_argument('--snyk-region', default='SNYK-US-01',
                        help='Snyk API region (default: SNYK-US-01)')
+    parser.add_argument('--snyk-api-version', default='2024-10-15',
+                       help='Snyk API version (default: 2024-10-15)')
     parser.add_argument('--gitlab-token',
                        help='GitLab API token for private repositories')
     parser.add_argument('--gitlab-url', default='https://gitlab.com',
@@ -1461,6 +1717,10 @@ Examples:
                        help='Simulate validation without making API calls')
     parser.add_argument('--verbose', '-v', action='store_true',
                        help='Show detailed information')
+    parser.add_argument('--debug', action='store_true',
+                       help='Enable debug logging for troubleshooting repository mapping issues')
+    parser.add_argument('--list-orgs', action='store_true',
+                       help='List all accessible organizations and exit')
 
     args = parser.parse_args()
 
@@ -1470,14 +1730,40 @@ Examples:
 
     # Initialize Snyk API client
     print("🔧 Initializing Snyk API client...")
-    snyk_api = SnykAPI(args.snyk_token, args.snyk_region)
+    snyk_api = SnykAPI(args.snyk_token, args.snyk_region, args.debug)
+    
+    # Override the default API version if specified
+    if hasattr(args, 'snyk_api_version'):
+        print(f"🔧 Using Snyk API version: {args.snyk_api_version}")
+        # Update the API version for all methods
+        snyk_api.default_version = args.snyk_api_version
+
+    # Handle --list-orgs flag
+    if args.list_orgs:
+        print("🏢 Fetching all accessible organizations...")
+        try:
+            orgs = snyk_api.get_organizations()
+            print(f"\n📋 Found {len(orgs)} accessible organizations:")
+            print("=" * 80)
+            for org in orgs:
+                org_id = org.get('id', 'Unknown')
+                org_name = org.get('attributes', {}).get('name', 'Unknown')
+                org_slug = org.get('attributes', {}).get('slug', 'Unknown')
+                print(f"ID: {org_id}")
+                print(f"Name: {org_name}")
+                print(f"Slug: {org_slug}")
+                print("-" * 40)
+            return
+        except Exception as e:
+            print(f"❌ Error fetching organizations: {e}")
+            return
 
     # Initialize GitLab client
     print("🔧 Initializing GitLab client...")
-    gitlab_client = GitLabClient(args.gitlab_token, args.gitlab_url)
+    gitlab_client = GitLabClient(args.gitlab_token, args.gitlab_url, args.debug)
 
     # Initialize validator
-    validator = SCAValidator(snyk_api, gitlab_client)
+    validator = SCAValidator(snyk_api, gitlab_client, args.debug)
 
     # Get organizations to validate
     if args.org_id:

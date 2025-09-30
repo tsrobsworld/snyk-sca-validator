@@ -1,14 +1,32 @@
 # Snyk SCA File Validator
 
-A comprehensive tool for validating Snyk SCA (Software Composition Analysis) files against their actual repository sources. This validator supports both GitLab integration projects and CLI-created projects, ensuring that Snyk projects reference files that actually exist in the source repositories.
+A comprehensive tool for validating Snyk SCA (Software Composition Analysis) files against their actual repository sources. This validator uses an efficient join-based approach to match GitLab repositories with Snyk targets, ensuring that Snyk projects reference files that actually exist in the source repositories.
+
+## How It Works
+
+The validator uses a batch join approach for efficient validation:
+
+1. **Builds a GitLab Repository Catalog**: Lists all accessible GitLab repositories with their metadata (default branch, project path, etc.)
+2. **Collects Snyk Targets**: Gathers all Snyk targets from specified organizations and normalizes their repository URLs
+3. **Joins the Datasets**: Matches GitLab repositories with Snyk targets using canonical repository keys
+4. **Validates and Reports**: 
+   - Validates that Snyk-tracked files exist in GitLab repositories
+   - Identifies Snyk-supported files that aren't being tracked by Snyk
+   - Reports on stale Snyk targets (repositories no longer in GitLab)
+   - Reports on GitLab repositories with no Snyk coverage
 
 ## Features
 
-- **Multi-Platform Support**: Works with GitLab, GitHub, Bitbucket, and local repositories
-- **Efficient API Usage**: Uses `source_types` filtering to only process GitLab and CLI projects
-- **Comprehensive Validation**: Checks file existence and content across different platforms
-- **Detailed Reporting**: Generates both CSV and human-readable reports
+- **Efficient Join-Based Processing**: Processes all repositories in one pass for better performance
+- **Comprehensive Coverage Analysis**: Identifies matched repos, stale Snyk targets, and untracked GitLab repositories
+- **Multi-Platform Support**: Works with GitLab repositories and Snyk targets from GitLab integrations and CLI imports
+- **Detailed Reporting**: Generates comprehensive reports showing:
+  - Matched repositories with file validation results
+  - Stale Snyk targets (repositories no longer in GitLab)
+  - GitLab repositories with no Snyk coverage
+  - Snyk-supported files not being tracked
 - **Flexible Configuration**: Supports different Snyk regions and GitLab instances
+- **Debug Mode**: Optional detailed logging for troubleshooting
 
 ## Supported Repository Types
 
@@ -50,12 +68,12 @@ Validate a specific organization:
 python3 snyk_sca_validator.py --snyk-token YOUR_SNYK_TOKEN --org-id ORG_ID
 ```
 
-### Advanced Usage
-
 With GitLab token for private repositories:
 ```bash
 python3 snyk_sca_validator.py --snyk-token YOUR_SNYK_TOKEN --gitlab-token YOUR_GITLAB_TOKEN
 ```
+
+### Advanced Usage
 
 Custom GitLab instance:
 ```bash
@@ -67,14 +85,14 @@ Different Snyk region:
 python3 snyk_sca_validator.py --snyk-token YOUR_SNYK_TOKEN --snyk-region SNYK-EU-01
 ```
 
-Custom output files:
+Custom output report:
 ```bash
-python3 snyk_sca_validator.py --snyk-token YOUR_SNYK_TOKEN --output-csv results.csv --output-report report.txt
+python3 snyk_sca_validator.py --snyk-token YOUR_SNYK_TOKEN --output-report my_report.txt
 ```
 
-Dry run (simulation only):
+Debug logging for troubleshooting:
 ```bash
-python3 snyk_sca_validator.py --snyk-token YOUR_SNYK_TOKEN --dry-run
+python3 snyk_sca_validator.py --snyk-token YOUR_SNYK_TOKEN --debug
 ```
 
 ## Command Line Options
@@ -86,12 +104,8 @@ python3 snyk_sca_validator.py --snyk-token YOUR_SNYK_TOKEN --dry-run
 | `--snyk-region` | Snyk API region | No | SNYK-US-01 |
 | `--gitlab-token` | GitLab API token for private repos | No | - |
 | `--gitlab-url` | GitLab instance URL | No | https://gitlab.com |
-| `--output-csv` | Custom CSV output filename | No | Auto-generated |
-| `--output-report` | Custom report filename | No | Auto-generated |
-| `--dry-run` | Simulation mode (no API calls) | No | False |
-| `--verbose` | Detailed output | No | False |
-| `--debug` | Enable debug logging for troubleshooting repository mapping issues | No | False |
-| `--list-orgs` | List all accessible organizations and exit | No | False |
+| `--output-report` | Custom report filename | No | batch_report.txt |
+| `--debug` | Enable debug logging for troubleshooting | No | False |
 
 ## Supported Snyk Regions
 
@@ -102,28 +116,27 @@ python3 snyk_sca_validator.py --snyk-token YOUR_SNYK_TOKEN --dry-run
 
 ## Output Files
 
-### CSV Report
-Contains detailed validation results with columns:
-- `org_id`: Snyk organization ID
-- `target_id`: Snyk target ID
-- `target_name`: Target display name
-- `target_url`: Repository URL
-- `project_id`: Snyk project ID
-- `project_name`: Project name
-- `project_type`: Project type (npm, maven, etc.)
-- `root_dir`: Project root directory
-- `file_path`: File path in Snyk
-- `full_path`: Full file path in repository
-- `exists_in_gitlab`: Boolean indicating if file exists
-- `last_checked`: Timestamp of validation
+### Batch Report
+The validator generates a comprehensive text report (`batch_report.txt` by default) containing:
 
-### Text Report
-Contains a human-readable summary including:
-- Overall statistics
-- Organization-level summaries
-- Target-level details
-- Project-level validation results
-- List of missing files
+**Summary Section:**
+- Total number of matched repositories
+- Number of stale Snyk targets (repositories no longer in GitLab)
+- Number of GitLab repositories with no Snyk coverage
+
+**Snyk-Only (Stale Targets) Section:**
+- Lists repositories that have Snyk targets but are no longer accessible in GitLab
+- Useful for cleaning up old Snyk projects
+
+**GitLab-Only (No Snyk Targets) Section:**
+- Lists GitLab repositories that have no Snyk coverage
+- Useful for identifying repositories that should be imported into Snyk
+
+**Matched Repositories Section:**
+- For each matched repository:
+  - Number of files tracked by Snyk
+  - Number of Snyk-supported files found in the repository
+  - List of supported files not being tracked by Snyk (potential missing projects)
 
 ## Repository URL Support
 

@@ -264,7 +264,7 @@ def evaluate_matches(
                     # Get target details to find the URL
                     target_url = snyk.get_target_url(org_id, project_target_id)
                     debug_log(f"Project {project.get('id')} belongs to target {project_target_id} with URL: {target_url}", debug)
-                    if target_url and repo_url and (target_url in repo_url or repo_url in target_url):
+                    if target_url and repo_url and target_url == repo_url:
                         matching_projects.append(project)
                         debug_log(f"Matched project {project.get('id')} to repo by target URL: {target_url}", debug)
                 else:
@@ -301,7 +301,10 @@ def evaluate_matches(
                         'exists': check.get('exists', False),
                         'validation_status': check.get('status', 'unknown'),
                         'repo_key': k,
-                        'gitlab_url': gitlab_meta.get('web_url', '')
+                        'gitlab_url': gitlab_meta.get('web_url', ''),
+                        'org_id': org_id,
+                        'org_name': snyk.get_organization_name(org_id),
+                        'project_url': f"https://app.snyk.io/org/{snyk.get_organization_name(org_id)}/project/{p.get('id')}"
                     }
                     
                     if check.get('exists', False):
@@ -388,7 +391,9 @@ def render_report(results: Dict) -> str:
             for file_detail in m['tracked_file_details']:
                 lines.append(f"    ✅ {file_detail['file_path']}")
                 if file_detail['project_name']:
-                    lines.append(f"      (Project: {file_detail['project_name']})")
+                    lines.append(f"      Project: {file_detail['project_name']}")
+                    lines.append(f"      Org: {file_detail['org_name']} ({file_detail['org_id']})")
+                    lines.append(f"      URL: {file_detail['project_url']}")
         
         # Show stale files in Snyk (missing files)
         if m['stale_file_details']:
@@ -396,7 +401,9 @@ def render_report(results: Dict) -> str:
             for file_detail in m['stale_file_details']:
                 lines.append(f"    ❌ {file_detail['file_path']}")
                 if file_detail['project_name']:
-                    lines.append(f"      (Project: {file_detail['project_name']})")
+                    lines.append(f"      Project: {file_detail['project_name']}")
+                    lines.append(f"      Org: {file_detail['org_name']} ({file_detail['org_id']})")
+                    lines.append(f"      URL: {file_detail['project_url']}")
         
         # Show supported files not tracked by Snyk
         if m['untracked_supported_files']:

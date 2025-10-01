@@ -309,6 +309,25 @@ class SnykAPI:
             debug_log(f"Target URL API error {resp.status_code}: {resp.text}", self.debug)
             return None
     
+    def get_organization_name(self, org_id: str) -> str:
+        """Get organization name by ID"""
+        debug_log(f"Fetching organization name for: {org_id}", self.debug)
+        url = f"{self.base_url}/orgs/{org_id}"
+        params = {'version': '2024-10-15'}
+        debug_log(f"Org name API: {url}, params: {params}", self.debug)
+        resp = self.session.get(url, params=params)
+        debug_log(f"Org name API status: {resp.status_code}", self.debug)
+        
+        if resp.status_code == 200:
+            data = resp.json()
+            org_data = data.get('data', {})
+            org_name = org_data.get('attributes', {}).get('name', org_id)
+            debug_log(f"Organization name: {org_name}", self.debug)
+            return org_name
+        else:
+            debug_log(f"Org name API error {resp.status_code}: {resp.text}", self.debug)
+            return org_id  # Fallback to org_id if name can't be fetched
+    
     def get_project_details(self, org_id: str, project_id: str) -> Optional[Dict]:
         """Get detailed information about a specific project"""
         debug_log(f"Fetching project details: {project_id}", self.debug)

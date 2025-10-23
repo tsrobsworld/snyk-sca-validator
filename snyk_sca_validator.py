@@ -56,15 +56,39 @@ def build_gitlab_repo_catalog(gitlab: GitLabClient, debug: bool = False) -> Dict
 
     catalog: Dict[str, Dict] = {}
     page = 1
+    max_retries = 3
+    
     while True:
         debug_log(f"GitLab list projects page {page} - URL: {url}, params: {params}", debug)
-        resp = session.get(url, params=params)
-        debug_log(f"GitLab list projects status: {resp.status_code}", debug)
+        
+        # Retry logic for network issues
+        for attempt in range(max_retries):
+            try:
+                resp = session.get(url, params=params, timeout=30)
+                debug_log(f"GitLab list projects status: {resp.status_code}", debug)
+                break
+            except (requests.exceptions.ChunkedEncodingError, 
+                    requests.exceptions.ConnectionError, 
+                    requests.exceptions.Timeout) as e:
+                debug_log(f"GitLab API attempt {attempt + 1} failed: {e}", debug)
+                if attempt < max_retries - 1:
+                    import time
+                    time.sleep(2 ** attempt)  # Exponential backoff
+                    continue
+                else:
+                    debug_log(f"GitLab API failed after {max_retries} attempts", debug)
+                    return catalog
+        
         if resp.status_code != 200:
             debug_log(f"GitLab list projects error body: {resp.text}", debug)
             break
 
-        projects = resp.json()
+        try:
+            projects = resp.json()
+        except ValueError as e:
+            debug_log(f"GitLab API response not valid JSON: {e}", debug)
+            break
+            
         if not projects:
             break
 
@@ -202,7 +226,8 @@ def evaluate_matches(
         'snyk_only': [],
         'gitlab_only': [],
         'cli_without_repo': cli_without_repo,
-        'stale_files': []  # Files tracked in Snyk but missing from GitLab
+        'stale_files': [],  # Files tracked in Snyk but missing from GitLab
+        'duplicate_projects': []  # Duplicate projects detected by name pattern analysis
     }
 
     # Snyk-only: stale Snyk targets (repo missing)
@@ -248,6 +273,19 @@ def evaluate_matches(
             debug_log(f"Fetching all projects for org {org_id} to match by URL", debug)
             all_projects = snyk.get_all_projects_for_org(org_id)
             debug_log(f"Found {len(all_projects)} total projects in org {org_id}", debug)
+            
+            # Detect duplicate projects using name pattern analysis
+            duplicate_projects = validator.detect_duplicate_projects_by_name_pattern(all_projects)
+            if duplicate_projects:
+                # Add URLs to duplicate projects
+                for duplicate in duplicate_projects:
+                    duplicate['org_url'] = snyk.get_organization_url(duplicate['org_id'])
+                    duplicate['project_url'] = snyk.get_project_url(duplicate['org_id'], duplicate['project_id'])
+                    duplicate['newer_project_url'] = snyk.get_project_url(duplicate['org_id'], duplicate['duplicate_of'])
+                
+                results['duplicate_projects'] = results.get('duplicate_projects', [])
+                results['duplicate_projects'].extend(duplicate_projects)
+                debug_log(f"Found {len(duplicate_projects)} duplicate projects in org {org_id}", debug)
             
             # Match projects to this GitLab repo by URL
             repo_url = gitlab_meta.get('web_url', '')
@@ -355,9 +393,10 @@ def render_report(results: Dict) -> str:
     lines.append(f"Snyk-only repos (stale targets): {len(results['snyk_only'])}")
     lines.append(f"GitLab-only repos (no Snyk targets): {len(results['gitlab_only'])}")
     lines.append(f"CLI targets without repo URLs: {len(results.get('cli_without_repo', []))}")
+    lines.append(f"Duplicate projects detected: {len(results.get('duplicate_projects', []))}")
     lines.append("")
 
-    lines.append("SNYK-ONLY (STALE TARGETS)")
+    lines.append("SNYK-ONLY (NO GITLAB TARGETS FOUND)")
     lines.append("-" * 40)
     for item in results['snyk_only'][:200]:
         lines.append(f"Repo key: {item['repo_key']}")
@@ -378,6 +417,46 @@ def render_report(results: Dict) -> str:
     for item in results.get('cli_without_repo', [])[:200]:
         lines.append(f"Target: {item['target_name']} (Org: {item['org_id']})")
     lines.append("")
+
+    lines.append("DUPLICATE PROJECTS")
+    lines.append("-" * 40)
+    
+    # Group duplicates by unique identifier for better display
+    duplicate_groups = {}
+    for duplicate in results.get('duplicate_projects', []):
+        key = duplicate['unique_identifier']
+        if key not in duplicate_groups:
+            duplicate_groups[key] = {
+                'newer_project': None,
+                'stale_projects': []
+            }
+        duplicate_groups[key]['stale_projects'].append(duplicate)
+    
+    for unique_id, group in list(duplicate_groups.items())[:50]:  # Limit to 50 groups
+        lines.append(f"Unique Identifier: {unique_id}")
+        lines.append("")
+        
+        # Show newer project (keep this one)
+        if group['stale_projects']:
+            newer_project = group['stale_projects'][0]  # First one is the newer one
+            lines.append(f"✅ KEEP: {newer_project['duplicate_of_name']} ({newer_project['duplicate_of']})")
+            lines.append(f"   Type: {newer_project['project_type']}")
+            lines.append(f"   Created: {newer_project['duplicate_created']}")
+            lines.append(f"   Org: {newer_project['org_id']}")
+            lines.append(f"   Project URL: {newer_project.get('newer_project_url', 'N/A')}")
+            lines.append("")
+            
+            # Show stale projects (remove these)
+            lines.append("❌ REMOVE (Stale Duplicates):")
+            for stale in group['stale_projects']:
+                lines.append(f"   • {stale['project_name']} ({stale['project_id']})")
+                lines.append(f"     Type: {stale['project_type']}")
+                lines.append(f"     Created: {stale['created']}")
+                lines.append(f"     Reason: {stale['reason']}")
+                lines.append(f"     Project URL: {stale.get('project_url', 'N/A')}")
+                lines.append("")
+        
+        lines.append("-" * 40)
 
     lines.append("MATCHED REPOSITORIES")
     lines.append("-" * 40)

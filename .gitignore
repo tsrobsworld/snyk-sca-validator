@@ -62,3 +62,9 @@ logs/
 # Temporary files
 *.tmp
 *.temp
+snyk_ignored_issues_fetcher.py
+test_ignored_issues.json
+test_ignored_issues.py
+snyk_ignored_issues_*.json
+# Snyk Security Extension - AI Rules (auto-generated)
+.cursor/rules/snyk_rules.mdc

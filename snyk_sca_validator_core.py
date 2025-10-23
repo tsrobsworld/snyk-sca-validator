@@ -57,7 +57,7 @@ class SnykAPI:
         debug_log(f"Fetching organizations for group: {group_id}", self.debug)
         
         # Try different API versions for group orgs
-        versions = ['2024-10-15', '2023-05-29', '2023-06-18']
+        versions = ['2024-10-15', '2023-05-29']
         
         for version in versions:
             debug_log(f"Trying group orgs API with version: {version}", self.debug)
@@ -327,6 +327,19 @@ class SnykAPI:
         else:
             debug_log(f"Org name API error {resp.status_code}: {resp.text}", self.debug)
             return org_id  # Fallback to org_id if name can't be fetched
+    
+    def get_organization_url(self, org_id: str) -> str:
+        """Get organization URL for Snyk web interface"""
+        org_name = self.get_organization_name(org_id)
+        # Convert org name to URL-friendly format (lowercase, replace spaces with hyphens)
+        org_slug = org_name.lower().replace(' ', '-').replace('_', '-')
+        return f"https://app.snyk.io/org/{org_slug}/"
+    
+    def get_project_url(self, org_id: str, project_id: str) -> str:
+        """Get project URL for Snyk web interface"""
+        org_name = self.get_organization_name(org_id)
+        org_slug = org_name.lower().replace(' ', '-').replace('_', '-')
+        return f"https://app.snyk.io/org/{org_slug}/project/{project_id}"
     
     def get_project_details(self, org_id: str, project_id: str) -> Optional[Dict]:
         """Get detailed information about a specific project"""
@@ -645,3 +658,90 @@ class SCAValidator:
         """Scan repository for Snyk-supported files"""
         debug_log(f"Scanning repository for supported files", self.debug)
         return self.gitlab.scan_repository_for_supported_files(repo_info)
+    
+    def detect_duplicate_projects_by_name_pattern(self, all_projects: List[Dict]) -> List[Dict]:
+        """
+        Detect duplicate projects based on name pattern analysis.
+        Uses existing project data - no additional API calls needed!
+        
+        Looks for projects with the same unique identifier (part after ':') 
+        within the same target (repository).
+        """
+        debug_log(f"Detecting duplicate projects from {len(all_projects)} total projects", self.debug)
+        duplicates = []
+        
+        # Group projects by target_id and unique identifier after ':'
+        target_groups = {}
+        
+        for project in all_projects:
+            attrs = project.get('attributes', {})
+            project_name = attrs.get('name', '')
+            target_id = project.get('relationships', {}).get('target', {}).get('data', {}).get('id')
+            
+            if not target_id or ':' not in project_name:
+                continue
+                
+            # Extract unique identifier after ':' and normalize path
+            unique_part = project_name.split(':', 1)[1].strip()
+            # Normalize path to handle ./ and ../ variations
+            import os
+            unique_part = os.path.normpath(unique_part)
+            
+            if target_id not in target_groups:
+                target_groups[target_id] = {}
+            if unique_part not in target_groups[target_id]:
+                target_groups[target_id][unique_part] = []
+                
+            target_groups[target_id][unique_part].append({
+                'project_id': project.get('id'),
+                'project_name': project_name,
+                'created': attrs.get('created', ''),
+                'org_id': project.get('relationships', {}).get('organization', {}).get('data', {}).get('id'),
+                'target_id': target_id,
+                'project_type': attrs.get('type', 'unknown')
+            })
+        
+        # Check for duplicates within each target
+        for target_id, unique_groups in target_groups.items():
+            debug_log(f"Checking target {target_id} with {len(unique_groups)} unique identifiers", self.debug)
+            for unique_part, projects in unique_groups.items():
+                if len(projects) > 1:
+                    debug_log(f"Found {len(projects)} projects with same unique identifier: {unique_part}", self.debug)
+                    # Multiple projects with same unique identifier in same target
+                    stale_projects = self._analyze_name_pattern_duplicates(projects, unique_part)
+                    if stale_projects:
+                        duplicates.extend(stale_projects)
+        
+        debug_log(f"Found {len(duplicates)} duplicate projects", self.debug)
+        return duplicates
+    
+    def _analyze_name_pattern_duplicates(self, projects: List[Dict], unique_part: str) -> List[Dict]:
+        """Analyze projects with same unique identifier to find stale ones"""
+        stale_projects = []
+        
+        # Sort by creation date (newest first)
+        projects.sort(key=lambda x: x.get('created', ''), reverse=True)
+        
+        debug_log(f"Analyzing {len(projects)} projects with unique identifier: {unique_part}", self.debug)
+        for i, project in enumerate(projects):
+            debug_log(f"  Project {i+1}: {project['project_name']} (created: {project['created']})", self.debug)
+        
+        # Keep the newest project, mark others as stale
+        for i, project in enumerate(projects):
+            if i > 0:  # Skip the first (newest) project
+                stale_projects.append({
+                    'project_id': project['project_id'],
+                    'project_name': project['project_name'],
+                    'unique_identifier': unique_part,
+                    'reason': 'Duplicate project - newer version exists',
+                    'duplicate_of': projects[0]['project_id'],
+                    'duplicate_of_name': projects[0]['project_name'],
+                    'org_id': project['org_id'],
+                    'target_id': project['target_id'],
+                    'created': project['created'],
+                    'duplicate_created': projects[0]['created'],
+                    'project_type': project['project_type']
+                })
+                debug_log(f"Marking as stale: {project['project_name']} (duplicate of: {projects[0]['project_name']})", self.debug)
+        
+        return stale_projects

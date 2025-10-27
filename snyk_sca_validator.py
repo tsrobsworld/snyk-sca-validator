@@ -27,6 +27,7 @@ from typing import Dict, List, Optional, Tuple, Set
 from datetime import datetime
 import requests
 import os
+import json
 
 try:
     # Import core classes from separate module
@@ -36,7 +37,7 @@ except Exception as e:
     sys.exit(1)
 
 
-def build_gitlab_repo_catalog(gitlab: GitLabClient, debug: bool = False) -> Dict[str, Dict]:
+def build_gitlab_repo_catalog(gitlab: GitLabClient, debug: bool = False, timeout: int = 60, max_retries: int = 3) -> Dict[str, Dict]:
     """
     List GitLab projects the token can access and return a mapping keyed by
     canonical repo key: f"{host}/{full_path}" where full_path is group[/subgroup]/project.
@@ -56,24 +57,39 @@ def build_gitlab_repo_catalog(gitlab: GitLabClient, debug: bool = False) -> Dict
 
     catalog: Dict[str, Dict] = {}
     page = 1
-    max_retries = 3
     
     while True:
         debug_log(f"GitLab list projects page {page} - URL: {url}, params: {params}", debug)
         
-        # Retry logic for network issues
+        # Retry logic for network issues with rate limiting support
         for attempt in range(max_retries):
             try:
-                resp = session.get(url, params=params, timeout=30)
+                # Increased timeout for slow networks (connect and read)
+                resp = session.get(url, params=params, timeout=(timeout, timeout))  # (connect, read) timeout in seconds
+                
+                # Check for rate limiting
+                if resp.status_code == 429:
+                    retry_after = resp.headers.get('Retry-After', '30')
+                    try:
+                        wait_time = int(retry_after)
+                    except ValueError:
+                        wait_time = 30
+                    debug_log(f"GitLab API rate limited. Waiting {wait_time} seconds...", debug)
+                    import time
+                    time.sleep(wait_time)
+                    continue
+                
                 debug_log(f"GitLab list projects status: {resp.status_code}", debug)
                 break
             except (requests.exceptions.ChunkedEncodingError, 
                     requests.exceptions.ConnectionError, 
                     requests.exceptions.Timeout) as e:
+                wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
                 debug_log(f"GitLab API attempt {attempt + 1} failed: {e}", debug)
                 if attempt < max_retries - 1:
                     import time
-                    time.sleep(2 ** attempt)  # Exponential backoff
+                    debug_log(f"Waiting {wait_time} seconds before retry...", debug)
+                    time.sleep(wait_time)
                     continue
                 else:
                     debug_log(f"GitLab API failed after {max_retries} attempts", debug)
@@ -98,11 +114,14 @@ def build_gitlab_repo_catalog(gitlab: GitLabClient, debug: bool = False) -> Dict
             if not full_path:
                 continue
             key = f"{gitlab.gitlab_url.replace('https://', '').replace('http://', '').rstrip('/')}/{full_path}"
+            web_url = p.get('web_url', '')
+            # Store normalized URL for flexible matching
             catalog[key] = {
                 'id': p.get('id'),
                 'default_branch': p.get('default_branch'),
                 'path_with_namespace': full_path,
-                'web_url': p.get('web_url')
+                'web_url': web_url,
+                'normalized_web_url': normalize_url_for_matching(web_url) if web_url else ''
             }
 
         # pagination
@@ -133,44 +152,53 @@ def build_snyk_target_catalog(snyk: SnykAPI, org_ids: List[str], gitlab: GitLabC
         for t in targets:
             attrs = t.get('attributes', {})
             url = attrs.get('url')
-            target_type = attrs.get('type', 'unknown')
+            # Get integration type from relationships, not attributes.type
+            integration_rel = t.get('relationships', {}).get('integration', {}).get('data', {})
+            integration_type = integration_rel.get('attributes', {}).get('integration_type', 'unknown')
             
-            debug_log(f"Processing target: {t.get('id')}, type: {target_type}, url: {url}", debug)
+            debug_log(f"Processing target: {t.get('id')}, integration_type: {integration_type}, url: {url}", debug)
             debug_log(f"Full target structure: {t}", debug)
             
-            # Handle GitLab targets (check both explicit type and URL parsing)
-            if url and (target_type == 'gitlab' or target_type == 'unknown'):
-                repo_info = gitlab.parse_repo_url(url)
-                if repo_info and repo_info.get('platform') == 'gitlab':
-                    # canonical key must match GitLab catalog key build
-                    host = repo_info.get('host', 'gitlab.com')
-                    owner = repo_info.get('owner', '')
-                    repo = repo_info.get('repo', '')
-                    full_path = f"{owner}/{repo}" if owner else repo
-                    key = f"{host}/{full_path}"
-                    catalog.setdefault(key, []).append({
+            # Handle GitLab and CLI targets - process any that have GitLab URLs
+            # integration_type can be 'gitlab' (GitLab integration) or 'cli' (CLI import of GitLab repo)
+            if integration_type in ['gitlab', 'cli']:
+                if url:
+                    # Try to parse the URL to see if it's a GitLab repo
+                    repo_info = gitlab.parse_repo_url(url)
+                    
+                    if repo_info and repo_info.get('platform') == 'gitlab':
+                        # This is a GitLab repo (either from GitLab integration or CLI import)
+                        host = repo_info.get('host', 'gitlab.com')
+                        owner = repo_info.get('owner', '')
+                        repo = repo_info.get('repo', '')
+                        full_path = f"{owner}/{repo}" if owner else repo
+                        key = f"{host}/{full_path}"
+                        catalog.setdefault(key, []).append({
+                            'org_id': org_id,
+                            'target_id': t.get('id'),
+                            'target_name': attrs.get('display_name', t.get('id')),
+                            'target_url': url,
+                            'target_type': integration_type,
+                            'repo_info': repo_info
+                        })
+                        debug_log(f"Added {integration_type} target with GitLab URL: {key}", debug)
+                    else:
+                        # Not a GitLab repo - skip GitHub, Bitbucket, etc.
+                        debug_log(f"Skipping non-GitLab target: {url}", debug)
+                else:
+                    # CLI target without URL - store for later matching via projects
+                    cli_info = {
                         'org_id': org_id,
                         'target_id': t.get('id'),
                         'target_name': attrs.get('display_name', t.get('id')),
-                        'target_url': url,
-                        'target_type': 'gitlab',
-                        'repo_info': repo_info
-                    })
-                    debug_log(f"Added GitLab target: {key}", debug)
-            
-            # Handle CLI targets - try to extract repo URL from project attributes
-            elif target_type == 'cli':
-                # For CLI targets, we'll need to check projects to find repo URLs
-                # For now, mark as CLI without repo URL
-                cli_targets_without_repo.append({
-                    'org_id': org_id,
-                    'target_id': t.get('id'),
-                    'target_name': attrs.get('display_name', t.get('id')),
-                    'target_type': 'cli'
-                })
-                debug_log(f"Added CLI target without repo URL: {t.get('id')}", debug)
+                        'target_type': 'cli',
+                        'full_target_data': t  # Store full target data for inspection
+                    }
+                    cli_targets_without_repo.append(cli_info)
+                    debug_log(f"Added CLI target without repo URL: {t.get('id')}", debug)
+                    debug_log(f"Full CLI target data: {json.dumps(t, indent=2)}", debug)
             else:
-                debug_log(f"Skipping target {t.get('id')} with type '{target_type}' and url '{url}'", debug)
+                debug_log(f"Skipping target {t.get('id')} with integration_type '{integration_type}' and url '{url}'", debug)
     
     debug_log(f"Built catalog with {len(catalog)} repo keys and {len(cli_targets_without_repo)} CLI targets without repo URLs", debug)
     
@@ -184,6 +212,31 @@ def build_snyk_target_catalog(snyk: SnykAPI, org_ids: List[str], gitlab: GitLabC
 def normalize_key(host: str, full_path: str) -> str:
     # Keep case as-is to respect GitLab path semantics; trim slashes
     return f"{host.rstrip('/')}/{full_path.strip('/')}"
+
+
+def normalize_url_for_matching(url: str) -> str:
+    """
+    Normalize URLs to handle http/https and .git suffix variations
+    Ensures both http://gitlab.com/repo.git and https://gitlab.com/repo match
+    """
+    if not url:
+        return url
+    
+    # Convert to lowercase for case-insensitive matching
+    normalized = url.lower()
+    
+    # Normalize http to https
+    if normalized.startswith('http://'):
+        normalized = normalized.replace('http://', 'https://', 1)
+    
+    # Remove .git suffix if present
+    if normalized.endswith('.git'):
+        normalized = normalized[:-4]
+    
+    # Remove trailing slash
+    normalized = normalized.rstrip('/')
+    
+    return normalized
 
 
 def extract_org_ids(args, snyk: SnykAPI) -> List[str]:
@@ -504,6 +557,8 @@ def main():
     parser.add_argument('--gitlab-token', help='GitLab API token for private repositories')
     parser.add_argument('--gitlab-url', default='https://gitlab.com', help='GitLab instance URL')
     parser.add_argument('--output-report', default='batch_report.txt', help='Output report filename')
+    parser.add_argument('--timeout', type=int, default=60, help='HTTP request timeout in seconds (default: 60)')
+    parser.add_argument('--max-retries', type=int, default=3, help='Maximum retry attempts for failed requests (default: 3)')
     parser.add_argument('--debug', action='store_true', help='Enable debug logging')
     args = parser.parse_args()
 
@@ -525,7 +580,7 @@ def main():
 
     # Build catalogs
     print("📚 Building GitLab repository catalog...")
-    gl_catalog = build_gitlab_repo_catalog(gitlab, args.debug)
+    gl_catalog = build_gitlab_repo_catalog(gitlab, args.debug, args.timeout, args.max_retries)
     print(f"   ✅ GitLab repos discovered: {len(gl_catalog)}")
 
     print("🎯 Collecting Snyk targets...")

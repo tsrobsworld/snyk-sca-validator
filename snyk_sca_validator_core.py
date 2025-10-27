@@ -12,7 +12,7 @@ from datetime import datetime
 import requests
 import os
 import re
-from urllib.parse import urlparse, unquote
+from urllib.parse import urlparse, unquote, parse_qs
 
 
 def debug_log(message: str, debug: bool = False) -> None:
@@ -93,12 +93,22 @@ class SnykAPI:
                 all_orgs.extend(orgs)
                 debug_log(f"Fetched {len(orgs)} orgs on page {page}, total: {len(all_orgs)}", self.debug)
                 
-                # Check for next page
-                next_page = resp.headers.get('X-Next-Page')
-                if not next_page:
+                # Check for next page using links.next (cursor-based pagination)
+                links = data.get('links', {})
+                next_url = links.get('next')
+                if next_url:
+                    # Extract starting_after parameter from the URL
+                    parsed = urlparse(next_url)
+                    query_params = parse_qs(parsed.query)
+                    starting_after = query_params.get('starting_after', [None])[0]
+                    if starting_after:
+                        params['starting_after'] = starting_after
+                        page += 1
+                        debug_log(f"Found next page, cursor: {starting_after}", self.debug)
+                    else:
+                        break
+                else:
                     break
-                params['page'] = next_page
-                page += 1
                 
             elif resp.status_code == 404:
                 debug_log(f"Group {group_id} not found with version {version}", self.debug)
@@ -154,11 +164,11 @@ class SnykAPI:
             return []
         
         # Try different API versions for targets
-        versions = ['2024-10-15', '2023-05-29', '2023-06-18']
+        versions = ['2024-10-15', '2024-09-04', '2023-05-29', '2023-06-18']
         
         for version in versions:
             debug_log(f"Trying targets API with version: {version}", self.debug)
-            targets = self._get_targets_with_version(org_id, version)
+            targets = self._get_targets_with_version(org_id, version, source_types=['gitlab', 'cli'])
             if targets is not None:
                 debug_log(f"Successfully fetched {len(targets)} targets with version {version}", self.debug)
                 return targets
@@ -168,10 +178,15 @@ class SnykAPI:
         debug_log("Failed to fetch targets with all API versions", self.debug)
         return []
     
-    def _get_targets_with_version(self, org_id: str, version: str) -> Optional[List[Dict]]:
+    def _get_targets_with_version(self, org_id: str, version: str, source_types: Optional[List[str]] = None) -> Optional[List[Dict]]:
         """Get targets for organization with specific API version"""
         url = f"{self.base_url}/orgs/{org_id}/targets"
         params = {'version': version}
+        
+        # Add source_types filter for gitlab and cli targets
+        if source_types:
+            params['source_types'] = ','.join(source_types)
+            params['limit'] = 100
         
         debug_log(f"API Request - URL: {url}, params: {params}", self.debug)
         resp = self.session.get(url, params=params)
@@ -374,6 +389,11 @@ class GitLabClient:
             return None
         
         debug_log(f"Parsing repo URL: {url}", self.debug)
+        
+        # Normalize http to https for consistency
+        if url.startswith('http://'):
+            url = url.replace('http://', 'https://', 1)
+            debug_log(f"Normalized http to https: {url}", self.debug)
         
         # Handle different URL formats
         if url.startswith('git@'):

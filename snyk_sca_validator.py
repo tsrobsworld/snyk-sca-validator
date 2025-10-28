@@ -65,7 +65,7 @@ def build_gitlab_repo_catalog(gitlab: GitLabClient, debug: bool = False, timeout
         for attempt in range(max_retries):
             try:
                 # Increased timeout for slow networks (connect and read)
-                resp = session.get(url, params=params, timeout=(timeout, timeout))  # (connect, read) timeout in seconds
+                resp = session.get(url, params=params, timeout=(timeout, timeout), verify=gitlab.verify_ssl)  # (connect, read) timeout in seconds
                 
                 # Check for rate limiting
                 if resp.status_code == 429:

@@ -42,13 +42,12 @@ def build_gitlab_repo_catalog(gitlab: GitLabClient, debug: bool = False, timeout
     List GitLab projects the token can access and return a mapping keyed by
     canonical repo key: f"{host}/{full_path}" where full_path is group[/subgroup]/project.
 
-    Uses /projects?membership=true to approximate the accessible catalog.
+    Uses /projects API to get all accessible repositories (including read access).
     """
     session = gitlab.session
     base = gitlab.gitlab_url.rstrip('/')
     url = f"{base}/api/v4/projects"
     params = {
-        'membership': 'true',  # projects the authenticated user is a member of
         'simple': 'true',
         'archived': 'false',
         'per_page': 100,

@@ -559,6 +559,7 @@ def main():
     parser.add_argument('--output-report', default='batch_report.txt', help='Output report filename')
     parser.add_argument('--timeout', type=int, default=60, help='HTTP request timeout in seconds (default: 60)')
     parser.add_argument('--max-retries', type=int, default=3, help='Maximum retry attempts for failed requests (default: 3)')
+    parser.add_argument('--no-ssl-verify', action='store_true', help='Disable SSL certificate verification for GitLab API calls')
     parser.add_argument('--debug', action='store_true', help='Enable debug logging')
     args = parser.parse_args()
 
@@ -569,7 +570,7 @@ def main():
 
     # Initialize clients
     snyk = SnykAPI(args.snyk_token, args.snyk_region, args.debug)
-    gitlab = GitLabClient(args.gitlab_token, args.gitlab_url, args.debug)
+    gitlab = GitLabClient(args.gitlab_token, args.gitlab_url, args.debug, verify_ssl=not args.no_ssl_verify)
     validator = SCAValidator(snyk, gitlab, args.debug)
 
     # Determine organizations to process

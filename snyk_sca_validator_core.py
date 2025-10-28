@@ -375,10 +375,11 @@ class SnykAPI:
 class GitLabClient:
     """GitLab API client for repository operations"""
     
-    def __init__(self, token: Optional[str] = None, gitlab_url: str = 'https://gitlab.com', debug: bool = False):
+    def __init__(self, token: Optional[str] = None, gitlab_url: str = 'https://gitlab.com', debug: bool = False, verify_ssl: bool = True):
         self.token = token
         self.gitlab_url = gitlab_url.rstrip('/')
         self.debug = debug
+        self.verify_ssl = verify_ssl
         self.session = requests.Session()
         if token:
             self.session.headers.update({'Authorization': f'Bearer {token}'})
@@ -473,7 +474,7 @@ class GitLabClient:
             url = f"{self.gitlab_url}/api/v4/projects/{owner}%2F{repo}"
         
         debug_log(f"GitLab API URL: {url}", self.debug)
-        resp = self.session.get(url)
+        resp = self.session.get(url, verify=self.verify_ssl)
         debug_log(f"GitLab API status: {resp.status_code}", self.debug)
         
         if resp.status_code == 200:
@@ -506,7 +507,7 @@ class GitLabClient:
         
         params = {'ref': branch}
         debug_log(f"GitLab file API URL: {url}, params: {params}", self.debug)
-        resp = self.session.get(url, params=params)
+        resp = self.session.get(url, params=params, verify=self.verify_ssl)
         debug_log(f"GitLab file API status: {resp.status_code}", self.debug)
         
         if resp.status_code == 200:
@@ -537,7 +538,7 @@ class GitLabClient:
         
         params = {'ref': branch}
         debug_log(f"GitLab file check API URL: {url}, params: {params}", self.debug)
-        resp = self.session.get(url, params=params)
+        resp = self.session.get(url, params=params, verify=self.verify_ssl)
         debug_log(f"GitLab file check API status: {resp.status_code}", self.debug)
         
         exists = resp.status_code == 200
@@ -563,7 +564,7 @@ class GitLabClient:
         branch = repo_info.get('branch', 'main')
         params = {'ref': branch, 'recursive': 'true'}
         debug_log(f"GitLab tree API URL: {url}, params: {params}", self.debug)
-        resp = self.session.get(url, params=params)
+        resp = self.session.get(url, params=params, verify=self.verify_ssl)
         debug_log(f"GitLab tree API status: {resp.status_code}", self.debug)
         
         if resp.status_code != 200:

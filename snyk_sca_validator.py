@@ -80,6 +80,8 @@ def build_gitlab_repo_catalog(gitlab: GitLabClient, debug: bool = False, timeout
                     continue
                 
                 debug_log(f"GitLab list projects status: {resp.status_code}", debug)
+                debug_log(f"GitLab API response headers: {dict(resp.headers)}", debug)
+                debug_log(f"GitLab API response body: {resp.text}", debug)
                 break
             except (requests.exceptions.ChunkedEncodingError, 
                     requests.exceptions.ConnectionError, 
@@ -115,6 +117,8 @@ def build_gitlab_repo_catalog(gitlab: GitLabClient, debug: bool = False, timeout
                 continue
             key = f"{gitlab.gitlab_url.replace('https://', '').replace('http://', '').rstrip('/')}/{full_path}"
             web_url = p.get('web_url', '')
+            debug_log(f"GitLab catalog key: {key} (path: {full_path}, web_url: {web_url})", debug)
+            debug_log(f"  Full GitLab project data: {p}", debug)
             # Store normalized URL for flexible matching
             catalog[key] = {
                 'id': p.get('id'),
@@ -158,6 +162,8 @@ def build_snyk_target_catalog(snyk: SnykAPI, org_ids: List[str], gitlab: GitLabC
             
             debug_log(f"Processing target: {t.get('id')}, integration_type: {integration_type}, url: {url}", debug)
             debug_log(f"Full target structure: {t}", debug)
+            debug_log(f"Target attributes: {attrs}", debug)
+            debug_log(f"Target relationships: {t.get('relationships', {})}", debug)
             
             # Handle GitLab and CLI targets - process any that have GitLab URLs
             # integration_type can be 'gitlab' (GitLab integration) or 'cli' (CLI import of GitLab repo)
@@ -173,6 +179,7 @@ def build_snyk_target_catalog(snyk: SnykAPI, org_ids: List[str], gitlab: GitLabC
                         repo = repo_info.get('repo', '')
                         full_path = f"{owner}/{repo}" if owner else repo
                         key = f"{host}/{full_path}"
+                        debug_log(f"Snyk target key: {key} (from URL: {url}, owner: {owner}, repo: {repo})", debug)
                         catalog.setdefault(key, []).append({
                             'org_id': org_id,
                             'target_id': t.get('id'),
@@ -273,6 +280,67 @@ def evaluate_matches(
     matched_keys: Set[str] = set(gitlab_catalog.keys()) & set(snyk_targets_by_key.keys())
     snyk_only_keys: Set[str] = set(snyk_targets_by_key.keys()) - set(gitlab_catalog.keys())
     gitlab_only_keys: Set[str] = set(gitlab_catalog.keys()) - set(snyk_targets_by_key.keys())
+    
+    debug_log(f"MATCHING ANALYSIS:", debug)
+    debug_log(f"  Total GitLab catalog keys: {len(gitlab_catalog)}", debug)
+    debug_log(f"  Total Snyk target keys: {len(snyk_targets_by_key)}", debug)
+    debug_log(f"  Matched keys ({len(matched_keys)}): {sorted(list(matched_keys))}", debug)
+    debug_log(f"  Snyk-only keys ({len(snyk_only_keys)}): {sorted(list(snyk_only_keys))}", debug)
+    
+    # Show ALL GitLab keys (not just first 10)
+    gitlab_keys_sorted = sorted(list(gitlab_catalog.keys()))
+    debug_log(f"  ALL GitLab catalog keys:", debug)
+    for i, key in enumerate(gitlab_keys_sorted):
+        debug_log(f"    {i+1}. {key}", debug)
+    
+    # Show ALL Snyk keys (not just first 10)  
+    snyk_keys_sorted = sorted(list(snyk_targets_by_key.keys()))
+    debug_log(f"  ALL Snyk target keys:", debug)
+    for i, key in enumerate(snyk_keys_sorted):
+        debug_log(f"    {i+1}. {key}", debug)
+    
+    # Check for specific Dell keys
+    dell_keys = [
+        "gitlab.dell.com/infrastructure/cpe/caching/osb-redis-enterprise",
+        "gitlab.dell.com/infrastructure/cpe/caching/osb-redis-pks"
+    ]
+    debug_log(f"SPECIFIC DELL KEY CHECK:", debug)
+    for key in dell_keys:
+        in_gitlab = key in gitlab_catalog
+        in_snyk = key in snyk_targets_by_key
+        debug_log(f"  {key}: GitLab={in_gitlab}, Snyk={in_snyk}", debug)
+        
+        # Search for similar keys if exact match not found
+        if not in_gitlab:
+            debug_log(f"    Searching for similar GitLab keys containing 'osb-redis':", debug)
+            similar_gitlab = [k for k in gitlab_keys_sorted if 'osb-redis' in k.lower()]
+            for similar in similar_gitlab:
+                debug_log(f"      Found: {similar}", debug)
+        
+        if not in_snyk:
+            debug_log(f"    Searching for similar Snyk keys containing 'osb-redis':", debug)
+            similar_snyk = [k for k in snyk_keys_sorted if 'osb-redis' in k.lower()]
+            for similar in similar_snyk:
+                debug_log(f"      Found: {similar}", debug)
+    
+    # Final catalog summary
+    debug_log(f"FINAL CATALOG SUMMARY:", debug)
+    debug_log(f"  GitLab catalog entries: {len(gitlab_catalog)}", debug)
+    debug_log(f"  Snyk target entries: {len(snyk_targets_by_key)}", debug)
+    debug_log(f"  Matched entries: {len(matched_keys)}", debug)
+    debug_log(f"  Snyk-only entries: {len(snyk_only_keys)}", debug)
+    debug_log(f"  GitLab-only entries: {len(gitlab_only_keys)}", debug)
+    
+    # Show complete catalogs
+    debug_log(f"COMPLETE GITLAB CATALOG:", debug)
+    for key, value in gitlab_catalog.items():
+        debug_log(f"  {key}: {value}", debug)
+    
+    debug_log(f"COMPLETE SNYK CATALOG:", debug)
+    for key, targets in snyk_targets_by_key.items():
+        debug_log(f"  {key}: {len(targets)} targets", debug)
+        for target in targets:
+            debug_log(f"    - {target['target_name']} ({target['target_url']})", debug)
 
     results = {
         'matched': [],

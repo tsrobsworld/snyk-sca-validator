@@ -191,9 +191,11 @@ class SnykAPI:
         debug_log(f"API Request - URL: {url}, params: {params}", self.debug)
         resp = self.session.get(url, params=params)
         debug_log(f"Targets API status: {resp.status_code}", self.debug)
+        debug_log(f"Targets API response headers: {dict(resp.headers)}", self.debug)
         
         if resp.status_code == 200:
             data = resp.json()
+            debug_log(f"Full targets API response: {data}", self.debug)
             targets = data.get('data', [])
             debug_log(f"Found {len(targets)} targets", self.debug)
             return targets

@@ -26,6 +26,7 @@ import sys
 from typing import Dict, List, Optional, Tuple, Set
 from datetime import datetime
 import requests
+from urllib.parse import urlparse
 import os
 import json
 
@@ -47,12 +48,17 @@ def build_gitlab_repo_catalog(gitlab: GitLabClient, debug: bool = False, timeout
     session = gitlab.session
     base = gitlab.gitlab_url.rstrip('/')
     url = f"{base}/api/v4/projects"
+    # If targeting gitlab.com, restrict to membership repos only; for self-hosted, include all accessible
+    host = urlparse(base).netloc
+    is_gitlab_dot_com = host.lower() == 'gitlab.com'
     params = {
         'simple': 'true',
         'archived': 'false',
         'per_page': 100,
         'order_by': 'path'
     }
+    if is_gitlab_dot_com:
+        params['membership'] = 'true'
 
     catalog: Dict[str, Dict] = {}
     page = 1
@@ -397,11 +403,73 @@ def evaluate_matches(
             # Detect duplicate projects using name pattern analysis
             duplicate_projects = validator.detect_duplicate_projects_by_name_pattern(all_projects)
             if duplicate_projects:
-                # Add URLs to duplicate projects
+                # Add URLs and attempt artifactId validation on pom.xml duplicates
                 for duplicate in duplicate_projects:
                     duplicate['org_url'] = snyk.get_organization_url(duplicate['org_id'])
                     duplicate['project_url'] = snyk.get_project_url(duplicate['org_id'], duplicate['project_id'])
                     duplicate['newer_project_url'] = snyk.get_project_url(duplicate['org_id'], duplicate['duplicate_of'])
+                    # Maven duplicate validation: compare pom.xml artifactId to second part after ':' in project name
+                    if duplicate.get('project_type', '').lower() == 'maven':
+                        # Fetch project details to find file path and root
+                        proj = snyk.get_project_details(duplicate['org_id'], duplicate['project_id'])
+                        attrs = proj.get('attributes', {}) if proj else {}
+                        # Expected artifactId = project name suffix after ':'
+                        expected_artifact = ''
+                        pname = duplicate.get('project_name', '') if 'project_name' in duplicate else attrs.get('name', '')
+                        if ':' in pname:
+                            expected_artifact = pname.split(':', 1)[1].strip()
+                        # Determine file path to pom.xml
+                        file_path = attrs.get('target_file') or attrs.get('file_path') or ''
+                        root = attrs.get('root', '')
+                        # Resolve repo via target URL
+                        target_url = snyk.get_target_url(duplicate['org_id'], duplicate['target_id'])
+                        if target_url:
+                            repo_info = gitlab.parse_repo_url(target_url)
+                            if repo_info and repo_info.get('platform') == 'gitlab':
+                                repo_info = dict(repo_info)
+                                repo_info['path_with_namespace'] = f"{repo_info.get('owner','')}/{repo_info.get('repo','')}".strip('/')
+                                repo_info['branch'] = gitlab.get_default_branch(repo_info)
+                                artifact_check = None
+                                # Strategy:
+                                # 1) If file_path is provided, try it
+                                if file_path:
+                                    artifact_check = validator.validate_pom_artifact_id(
+                                        repo_info,
+                                        file_path,
+                                        expected_artifact,
+                                        root
+                                    )
+                                # 2) Scan repo for pom.xml and collect all artifactIds
+                                candidates = validator.scan_repository_for_supported_files(repo_info)
+                                pom_candidates = [c['file_path'] for c in (candidates or []) if c['file_path'].lower().endswith('pom.xml')]
+                                debug_log(f"Maven duplicate: found {len(pom_candidates)} pom.xml files in repo for artifactId '{expected_artifact}'", debug)
+                                debug_log(f"  pom.xml paths: {pom_candidates[:10]}", debug)
+                                # Prefer pom.xml whose parent folder name matches expected artifactId
+                                try:
+                                    import os as _os
+                                    preferred = [p for p in pom_candidates if _os.path.basename(_os.path.dirname(p)).lower() == (expected_artifact or '').lower()]
+                                    ordered = preferred + [p for p in pom_candidates if p not in preferred]
+                                except Exception:
+                                    ordered = pom_candidates
+                                discovered = []
+                                for candidate in ordered:
+                                    content_check = validator.validate_pom_artifact_id(
+                                        repo_info,
+                                        candidate,
+                                        expected_artifact,
+                                        ''
+                                    )
+                                    discovered.append({'path': candidate, 'artifactId': content_check.get('found_artifact_id')})
+                                    # Capture first positive match, otherwise keep the last evaluated
+                                    artifact_check = content_check
+                                    if content_check.get('artifact_id_match'):
+                                        break
+                                if artifact_check is None:
+                                    artifact_check = {'expected_artifact_id': expected_artifact, 'found_artifact_id': None, 'artifact_id_match': False}
+                                duplicate['expected_artifact_id'] = artifact_check.get('expected_artifact_id')
+                                duplicate['found_artifact_id'] = artifact_check.get('found_artifact_id')
+                                duplicate['artifact_id_match'] = artifact_check.get('artifact_id_match')
+                                duplicate['pom_discovered'] = discovered
                 
                 results['duplicate_projects'] = results.get('duplicate_projects', [])
                 results['duplicate_projects'].extend(duplicate_projects)
@@ -462,7 +530,7 @@ def evaluate_matches(
                         'gitlab_url': gitlab_meta.get('web_url', ''),
                         'org_id': org_id,
                         'org_name': snyk.get_organization_name(org_id),
-                        'project_url': f"https://app.snyk.io/org/{snyk.get_organization_name(org_id)}/project/{p.get('id')}"
+                    'project_url': f"https://app.snyk.io/org/{snyk.get_organization_name(org_id)}/project/{p.get('id')}"
                     }
                     
                     if check.get('exists', False):
@@ -564,6 +632,15 @@ def render_report(results: Dict) -> str:
             lines.append(f"   Created: {newer_project['duplicate_created']}")
             lines.append(f"   Org: {newer_project['org_id']}")
             lines.append(f"   Project URL: {newer_project.get('newer_project_url', 'N/A')}")
+            # If Maven validation present on the keeper, show it
+            if newer_project.get('expected_artifact_id') is not None:
+                status = 'MATCH' if newer_project.get('artifact_id_match') else 'MISMATCH'
+                lines.append(f"   Maven artifactId: expected='{newer_project.get('expected_artifact_id')}', found='{newer_project.get('found_artifact_id')}' [{status}]")
+            # If we discovered poms, list a few
+            if newer_project.get('pom_discovered'):
+                lines.append("   Discovered pom.xml artifactIds:")
+                for disc in newer_project.get('pom_discovered', [])[:5]:
+                    lines.append(f"     - {disc.get('path')}: {disc.get('artifactId')}")
             lines.append("")
             
             # Show stale projects (remove these)
@@ -574,6 +651,13 @@ def render_report(results: Dict) -> str:
                 lines.append(f"     Created: {stale['created']}")
                 lines.append(f"     Reason: {stale['reason']}")
                 lines.append(f"     Project URL: {stale.get('project_url', 'N/A')}")
+                if stale.get('expected_artifact_id') is not None:
+                    status = 'MATCH' if stale.get('artifact_id_match') else 'MISMATCH'
+                    lines.append(f"     Maven artifactId: expected='{stale.get('expected_artifact_id')}', found='{stale.get('found_artifact_id')}' [{status}]")
+                if stale.get('pom_discovered'):
+                    lines.append("     Discovered pom.xml artifactIds:")
+                    for disc in stale.get('pom_discovered', [])[:5]:
+                        lines.append(f"       - {disc.get('path')}: {disc.get('artifactId')}")
                 lines.append("")
         
         lines.append("-" * 40)
@@ -628,6 +712,7 @@ def main():
     parser.add_argument('--max-retries', type=int, default=3, help='Maximum retry attempts for failed requests (default: 3)')
     parser.add_argument('--no-ssl-verify', action='store_true', help='Disable SSL certificate verification for GitLab API calls')
     parser.add_argument('--debug', action='store_true', help='Enable debug logging')
+    parser.add_argument('--skip-org-validation', action='store_true', help='Skip Snyk org access validation and fetch targets directly')
     args = parser.parse_args()
 
     # Validate that at least one of group-id or org-id is provided
@@ -636,7 +721,7 @@ def main():
         sys.exit(1)
 
     # Initialize clients
-    snyk = SnykAPI(args.snyk_token, args.snyk_region, args.debug)
+    snyk = SnykAPI(args.snyk_token, args.snyk_region, args.debug, skip_org_validation=args.skip_org_validation)
     gitlab = GitLabClient(args.gitlab_token, args.gitlab_url, args.debug, verify_ssl=not args.no_ssl_verify)
     validator = SCAValidator(snyk, gitlab, args.debug)
 

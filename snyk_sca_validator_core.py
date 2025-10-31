@@ -25,7 +25,7 @@ def debug_log(message: str, debug: bool = False) -> None:
 class SnykAPI:
     """Snyk API client for fetching organizations, targets, and projects"""
     
-    def __init__(self, token: str, region: str = 'SNYK-US-01', debug: bool = False):
+    def __init__(self, token: str, region: str = 'SNYK-US-01', debug: bool = False, skip_org_validation: bool = False):
         self.token = token
         self.region = region
         self.debug = debug
@@ -35,6 +35,8 @@ class SnykAPI:
             'Authorization': f'token {token}',
             'Content-Type': 'application/json'
         })
+        # When true, do not pre-validate org access; proceed directly to targets
+        self.skip_org_validation = skip_org_validation
     
     def get_organizations(self) -> List[Dict]:
         """Get list of organizations accessible to the token"""
@@ -157,12 +159,11 @@ class SnykAPI:
     def get_targets_for_org(self, org_id: str) -> List[Dict]:
         """Get targets for organization with API version fallback"""
         debug_log(f"Fetching targets for organization: {org_id}", self.debug)
-        
-        # First validate organization access
-        if not self.validate_organization_access(org_id):
-            debug_log(f"Organization {org_id} is not accessible", self.debug)
-            return []
-        
+        # Optionally validate organization access first unless skipping is requested
+        if not self.skip_org_validation:
+            if not self.validate_organization_access(org_id):
+                debug_log(f"Organization {org_id} is not accessible (validation failed)", self.debug)
+                return []
         # Try different API versions for targets
         versions = ['2024-10-15', '2024-09-04', '2023-05-29', '2023-06-18']
         
@@ -564,16 +565,44 @@ class GitLabClient:
             url = f"{self.gitlab_url}/api/v4/projects/{owner}%2F{repo}/repository/tree"
         
         branch = repo_info.get('branch', 'main')
-        params = {'ref': branch, 'recursive': 'true'}
-        debug_log(f"GitLab tree API URL: {url}, params: {params}", self.debug)
-        resp = self.session.get(url, params=params, verify=self.verify_ssl)
-        debug_log(f"GitLab tree API status: {resp.status_code}", self.debug)
+        params = {'ref': branch, 'recursive': 'true', 'per_page': 100}
+        all_files = []
+        page = 1
         
-        if resp.status_code != 200:
-            debug_log(f"Could not scan GitLab repository tree: {resp.status_code}", self.debug)
-            return []
+        while True:
+            params['page'] = page
+            debug_log(f"GitLab tree API URL: {url}, params: {params}, page: {page}", self.debug)
+            resp = self.session.get(url, params=params, verify=self.verify_ssl)
+            debug_log(f"GitLab tree API status: {resp.status_code}", self.debug)
+            
+            if resp.status_code != 200:
+                debug_log(f"Could not scan GitLab repository tree: {resp.status_code}", self.debug)
+                debug_log(f"  Response text: {resp.text[:500]}", self.debug)
+                break
+            
+            page_files = resp.json()
+            if not page_files:
+                break
+            
+            all_files.extend(page_files)
+            
+            # Check for pagination
+            next_page = resp.headers.get('X-Next-Page')
+            if not next_page or next_page == '':
+                break
+            page = int(next_page)
         
-        files = resp.json()
+        files = all_files
+        debug_log(f"GitLab tree API returned {len(files)} total files/entries", self.debug)
+        # Show sample entries to understand structure
+        if files and self.debug:
+            sample_paths = [f.get('path', 'N/A') for f in files[:5]]
+            debug_log(f"  Sample paths: {sample_paths}", self.debug)
+            dirs = [f.get('path') for f in files if f.get('type') == 'tree']
+            blobs = [f.get('path') for f in files if f.get('type') == 'blob']
+            debug_log(f"  Directories: {len(dirs)}, Files: {len(blobs)}", self.debug)
+        pom_count = sum(1 for f in files if f.get('type') == 'blob' and f.get('path', '').lower().endswith('pom.xml'))
+        debug_log(f"  Found {pom_count} pom.xml files in tree", self.debug)
         supported_files = []
         
         # Define supported file patterns
@@ -658,6 +687,50 @@ class SCAValidator:
         
         debug_log(f"File validation result: {result}", self.debug)
         return result
+
+    def extract_maven_artifact_id(self, pom_xml_content: str) -> Optional[str]:
+        """Extract Maven artifactId from pom.xml content using XML parsing.
+        Tries project/artifactId, then project/parent/artifactId. Handles XML namespaces.
+        """
+        if not pom_xml_content:
+            return None
+        try:
+            import xml.etree.ElementTree as ET
+            root = ET.fromstring(pom_xml_content)
+
+            def localname(tag: str) -> str:
+                return tag.split('}', 1)[1] if '}' in tag else tag
+
+            # Ensure we're on <project>
+            if localname(root.tag) != 'project':
+                return None
+
+            # Direct child: project/artifactId
+            for child in list(root):
+                if localname(child.tag) == 'artifactId' and child.text:
+                    return child.text.strip()
+
+            # Fallback: project/parent/artifactId
+            for child in list(root):
+                if localname(child.tag) == 'parent':
+                    for grand in list(child):
+                        if localname(grand.tag) == 'artifactId' and grand.text:
+                            return grand.text.strip()
+        except Exception as _:
+            pass
+        return None
+
+    def validate_pom_artifact_id(self, repo_info: Dict, file_path: str, expected_artifact_id: str, root: str = '') -> Dict:
+        """Validate pom.xml artifactId matches expected value from project name suffix."""
+        full_path = os.path.join(root, file_path).replace('\\', '/').strip('/')
+        content = self.gitlab.get_file_content(repo_info, full_path)
+        artifact_id = self.extract_maven_artifact_id(content) if content else None
+        return {
+            'file_path': full_path,
+            'expected_artifact_id': expected_artifact_id,
+            'found_artifact_id': artifact_id,
+            'artifact_id_match': (artifact_id == expected_artifact_id) if artifact_id else False
+        }
     
     def _extract_file_paths_from_project(self, project_attrs: Dict) -> List[str]:
         """Extract file paths from Snyk project attributes"""

@@ -66,14 +66,5 @@ tmp/
 snyk_ignored_issues_*.json
 snyk_ignored_issues_*.csv
 
-
 # Snyk Security Extension - AI Rules (auto-generated)
 .cursor/rules/snyk_rules.mdc
-
-
-# Test files
-test_ignored_issues.py
-example_ignored_issues.sh
-IGNORED_ISSUES_README.md
-snyk_ignored_issues_fetcher.py
-snyk_sca_validator_core.py

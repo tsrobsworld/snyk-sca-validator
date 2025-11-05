@@ -10,6 +10,9 @@ import sys
 from typing import Dict, List, Optional, Tuple, Set
 from datetime import datetime
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+import time
 import os
 import re
 from urllib.parse import urlparse, unquote, parse_qs
@@ -25,12 +28,35 @@ def debug_log(message: str, debug: bool = False) -> None:
 class SnykAPI:
     """Snyk API client for fetching organizations, targets, and projects"""
     
-    def __init__(self, token: str, region: str = 'SNYK-US-01', debug: bool = False, skip_org_validation: bool = False):
+    def __init__(self, token: str, region: str = 'SNYK-US-01', debug: bool = False, skip_org_validation: bool = False, timeout: int = 60, max_retries: int = 5):
         self.token = token
         self.region = region
         self.debug = debug
         self.base_url = f"https://api.snyk.io/rest"
+        self.timeout = timeout
+        self.max_retries = max_retries
+        
+        # Set up retry strategy with exponential backoff
+        # Snyk API rate limit: 1620 requests/minute per API key
+        # Rate limiting returns HTTP 429 status code (not a header)
+        # Retry on: connection errors, timeouts, 429 (rate limit), 5xx server errors
+        # Don't retry on: 401, 403, 404 (permanent failures)
+        retry_strategy = Retry(
+            total=max_retries,
+            backoff_factor=60,  # Exponential backoff: 60s, 120s, 240s, 480s (or longer if Retry-After header present)
+            status_forcelist=[429, 500, 502, 503, 504],  # Retry on 429 (rate limit) and server errors
+            allowed_methods=["GET", "POST"],  # Only retry safe methods
+            respect_retry_after_header=True,  # Respect Retry-After header if present in 429 response
+            raise_on_status=False  # Don't raise on status, let us handle it
+        )
+        
+        # Create HTTP adapter with retry strategy
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        
+        # Set up session with retry adapter
         self.session = requests.Session()
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
         self.session.headers.update({
             'Authorization': f'token {token}',
             'Content-Type': 'application/json'
@@ -38,11 +64,45 @@ class SnykAPI:
         # When true, do not pre-validate org access; proceed directly to targets
         self.skip_org_validation = skip_org_validation
     
+    def _make_request(self, method: str, url: str, params: Optional[Dict] = None, **kwargs) -> Optional[requests.Response]:
+        """
+        Make HTTP request with timeout and retry logic.
+        Returns Response object or None on failure.
+        """
+        try:
+            # Add timeout if not specified
+            if 'timeout' not in kwargs:
+                kwargs['timeout'] = self.timeout
+            
+            debug_log(f"Making {method} request to {url} with params {params}, timeout {kwargs.get('timeout')}", self.debug)
+            resp = self.session.request(method, url, params=params, **kwargs)
+            debug_log(f"Response status: {resp.status_code}", self.debug)
+            
+            # Handle rate limiting (429 status code) - Snyk API rate limit: 1620 requests/minute
+            # The retry logic will automatically retry 429 responses with exponential backoff
+            # If Retry-After header is present, it will be respected; otherwise exponential backoff applies
+            if resp.status_code == 429:
+                retry_after = resp.headers.get('Retry-After')
+                if retry_after:
+                    debug_log(f"Rate limited (429). Retry-After header: {retry_after} seconds. Will retry automatically.", self.debug)
+                else:
+                    debug_log(f"Rate limited (429). No Retry-After header. Will retry with exponential backoff.", self.debug)
+                # Retry logic will handle this automatically via urllib3 Retry
+            
+            return resp
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout, requests.exceptions.RequestException) as e:
+            debug_log(f"Network error during request: {type(e).__name__}: {e}", self.debug)
+            # Retry logic will handle this automatically via urllib3 Retry
+            raise
+        except Exception as e:
+            debug_log(f"Unexpected error during request: {type(e).__name__}: {e}", self.debug)
+            raise
+    
     def get_organizations(self) -> List[Dict]:
         """Get list of organizations accessible to the token"""
         debug_log("Fetching Snyk organizations", self.debug)
         url = f"{self.base_url}/orgs"
-        resp = self.session.get(url)
+        resp = self.session.get(url, timeout=self.timeout)
         debug_log(f"Snyk organizations status: {resp.status_code}", self.debug)
         
         if resp.status_code == 200:
@@ -137,7 +197,7 @@ class SnykAPI:
             params = {'version': version}
             
             debug_log(f"API Request - URL: {url}, params: {params}", self.debug)
-            resp = self.session.get(url, params=params)
+            resp = self.session.get(url, params=params, timeout=self.timeout)
             debug_log(f"Organization access status: {resp.status_code}", self.debug)
             
             if resp.status_code == 200:
@@ -190,7 +250,7 @@ class SnykAPI:
             params['limit'] = 100
         
         debug_log(f"API Request - URL: {url}, params: {params}", self.debug)
-        resp = self.session.get(url, params=params)
+        resp = self.session.get(url, params=params, timeout=self.timeout)
         debug_log(f"Targets API status: {resp.status_code}", self.debug)
         debug_log(f"Targets API response headers: {dict(resp.headers)}", self.debug)
         

@@ -154,10 +154,25 @@ def build_snyk_target_catalog(snyk: SnykAPI, org_ids: List[str], gitlab: GitLabC
     
     debug_log(f"Building Snyk target catalog for {len(org_ids)} organizations", debug)
     
+    failed_orgs = []
     for i, org_id in enumerate(org_ids, 1):
         debug_log(f"Processing organization {i}/{len(org_ids)}: {org_id}", debug)
-        targets = snyk.get_targets_for_org(org_id)
-        debug_log(f"Found {len(targets)} targets for org {org_id}", debug)
+        try:
+            targets = snyk.get_targets_for_org(org_id)
+            debug_log(f"Found {len(targets)} targets for org {org_id}", debug)
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout, 
+                requests.exceptions.RequestException) as e:
+            error_msg = f"Network error processing org {org_id}: {type(e).__name__}: {str(e)}"
+            debug_log(error_msg, debug)
+            print(f"⚠️  {error_msg} - Skipping org and continuing...")
+            failed_orgs.append({'org_id': org_id, 'error': str(e)})
+            continue
+        except Exception as e:
+            error_msg = f"Unexpected error processing org {org_id}: {type(e).__name__}: {str(e)}"
+            debug_log(error_msg, debug)
+            print(f"⚠️  {error_msg} - Skipping org and continuing...")
+            failed_orgs.append({'org_id': org_id, 'error': str(e)})
+            continue
         
         for t in targets:
             attrs = t.get('attributes', {})
@@ -214,6 +229,13 @@ def build_snyk_target_catalog(snyk: SnykAPI, org_ids: List[str], gitlab: GitLabC
                 debug_log(f"Skipping target {t.get('id')} with integration_type '{integration_type}' and url '{url}'", debug)
     
     debug_log(f"Built catalog with {len(catalog)} repo keys and {len(cli_targets_without_repo)} CLI targets without repo URLs", debug)
+    
+    # Report failed orgs if any
+    if failed_orgs:
+        print(f"\n⚠️  Warning: {len(failed_orgs)} organization(s) failed to process:")
+        for failed in failed_orgs:
+            print(f"   - {failed['org_id']}: {failed['error'][:100]}")
+        print(f"   Continuing with remaining {len(org_ids) - len(failed_orgs)} organization(s)...")
     
     # Store CLI targets without repo for reporting
     if cli_targets_without_repo:
@@ -722,6 +744,11 @@ def generate_duplicates_csv(results: Dict, output_file: str) -> None:
     Generate a CSV file with combined KEEP and REMOVE duplicate projects.
     Each row represents one project (either KEEP or REMOVE).
     """
+    # Create output directory if it doesn't exist
+    output_dir = os.path.dirname(output_file)
+    if output_dir and not os.path.exists(output_dir):
+        os.makedirs(output_dir, exist_ok=True)
+    
     duplicates = results.get('duplicate_projects', [])
     if not duplicates:
         # Create empty CSV with headers
@@ -732,6 +759,7 @@ def generate_duplicates_csv(results: Dict, output_file: str) -> None:
                 'Created Date', 'Org ID', 'Project URL', 'Expected ArtifactId',
                 'Found ArtifactId', 'ArtifactId Match Status', 'Reason'
             ])
+        print(f"⚠️  No duplicate projects found. CSV created with headers only.")
         return
     
     # Group duplicates by unique_identifier
@@ -813,14 +841,18 @@ def generate_duplicates_csv(results: Dict, output_file: str) -> None:
             rows.append(remove_row)
     
     # Write CSV
-    with open(output_file, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow([
-            'Action', 'Unique Identifier', 'Project Name', 'Project ID', 'Type',
-            'Created Date', 'Org ID', 'Project URL', 'Expected ArtifactId',
-            'Found ArtifactId', 'ArtifactId Match Status', 'Reason'
-        ])
-        writer.writerows(rows)
+    try:
+        with open(output_file, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                'Action', 'Unique Identifier', 'Project Name', 'Project ID', 'Type',
+                'Created Date', 'Org ID', 'Project URL', 'Expected ArtifactId',
+                'Found ArtifactId', 'ArtifactId Match Status', 'Reason'
+            ])
+            writer.writerows(rows)
+        print(f"   ✅ Wrote {len(rows)} row(s) to CSV (including headers)")
+    except Exception as e:
+        raise Exception(f"Failed to write CSV file: {e}")
 
 
 def main():
@@ -847,7 +879,7 @@ def main():
         sys.exit(1)
 
     # Initialize clients
-    snyk = SnykAPI(args.snyk_token, args.snyk_region, args.debug, skip_org_validation=args.skip_org_validation)
+    snyk = SnykAPI(args.snyk_token, args.snyk_region, args.debug, skip_org_validation=args.skip_org_validation, timeout=args.timeout, max_retries=args.max_retries)
     gitlab = GitLabClient(args.gitlab_token, args.gitlab_url, args.debug, verify_ssl=not args.no_ssl_verify)
     validator = SCAValidator(snyk, gitlab, args.debug)
 
@@ -887,10 +919,17 @@ def main():
     # Generate CSV if requested
     if args.duplicates_csv:
         try:
-            generate_duplicates_csv(results, args.duplicates_csv)
-            print(f"✅ Saved duplicates CSV to {args.duplicates_csv}")
+            # Normalize path separators for cross-platform compatibility
+            normalized_path = os.path.normpath(args.duplicates_csv)
+            duplicate_count = len(results.get('duplicate_projects', []))
+            print(f"📊 Found {duplicate_count} duplicate project(s) to include in CSV")
+            generate_duplicates_csv(results, normalized_path)
+            print(f"✅ Saved duplicates CSV to {normalized_path}")
         except Exception as e:
             print(f"❌ Error saving duplicates CSV: {e}")
+            import traceback
+            if args.debug:
+                traceback.print_exc()
 
 
 if __name__ == '__main__':

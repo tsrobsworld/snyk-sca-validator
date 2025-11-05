@@ -17,14 +17,14 @@ The validator uses a batch join approach for efficient validation:
 
 ## Features
 
-- **Efficient Join-Based Processing**: Processes all repositories in one pass for better performance
 - **Comprehensive Coverage Analysis**: Identifies matched repos, stale Snyk targets, and untracked GitLab repositories
-- **Multi-Platform Support**: Works with GitLab repositories and Snyk targets from GitLab integrations and CLI imports
 - **Detailed Reporting**: Generates comprehensive reports showing:
   - Matched repositories with file validation results
   - Stale Snyk targets (repositories no longer in GitLab)
   - GitLab repositories with no Snyk coverage
   - Snyk-supported files not being tracked
+  - Duplicate projects with KEEP/REMOVE recommendations
+- **CSV Export**: Generate filterable CSV reports for duplicate projects
 - **Flexible Configuration**: Supports different Snyk regions and GitLab instances
 - **Debug Mode**: Optional detailed logging for troubleshooting
 
@@ -33,19 +33,16 @@ The validator uses a batch join approach for efficient validation:
 ### GitLab Integration Projects
 - Standard GitLab.com repositories
 - Custom GitLab instances
-- Both old and new GitLab URL formats (`/tree/` and `/-/tree/`)
 
 ### CLI Projects
 - Local file paths (`file://` and absolute paths)
 - SSH URLs (`git@host:owner/repo.git`)
-- GitHub repository references
-- Bitbucket repository references
 
 ## Installation
 
 1. Clone the repository:
 ```bash
-git clone <repository-url>
+git clone https://github.com/tsrobsworld/snyk-sca-validator
 cd snyk_sca_validator
 ```
 
@@ -68,9 +65,19 @@ Validate a specific organization:
 python3 snyk_sca_validator.py --snyk-token YOUR_SNYK_TOKEN --org-id ORG_ID
 ```
 
+Validate all organizations in a group:
+```bash
+python3 snyk_sca_validator.py --snyk-token YOUR_SNYK_TOKEN --group-id GROUP_ID
+```
+
 With GitLab token for private repositories:
 ```bash
 python3 snyk_sca_validator.py --snyk-token YOUR_SNYK_TOKEN --gitlab-token YOUR_GITLAB_TOKEN
+```
+
+Generate CSV report for duplicate projects:
+```bash
+python3 snyk_sca_validator.py --snyk-token YOUR_SNYK_TOKEN --org-id ORG_ID --duplicates-csv duplicates.csv
 ```
 
 ### Advanced Usage
@@ -100,11 +107,17 @@ python3 snyk_sca_validator.py --snyk-token YOUR_SNYK_TOKEN --debug
 | Option | Description | Required | Default |
 |--------|-------------|----------|---------|
 | `--snyk-token` | Snyk API token | Yes | - |
-| `--org-id` | Specific Snyk organization ID | No | All organizations |
+| `--org-id` | Specific Snyk organization ID (mutually exclusive with --group-id) | No | All organizations |
+| `--group-id` | Snyk group ID to process all organizations in group (mutually exclusive with --org-id) | No | - |
 | `--snyk-region` | Snyk API region | No | SNYK-US-01 |
 | `--gitlab-token` | GitLab API token for private repos | No | - |
 | `--gitlab-url` | GitLab instance URL | No | https://gitlab.com |
 | `--output-report` | Custom report filename | No | batch_report.txt |
+| `--duplicates-csv` | Generate CSV file with duplicate projects (KEEP and REMOVE) | No | - |
+| `--timeout` | HTTP request timeout in seconds | No | 60 |
+| `--max-retries` | Maximum retry attempts for failed requests | No | 3 |
+| `--no-ssl-verify` | Disable SSL certificate verification for GitLab API calls | No | False |
+| `--skip-org-validation` | Skip Snyk org access validation and fetch targets directly | No | False |
 | `--debug` | Enable debug logging for troubleshooting | No | False |
 
 ## Supported Snyk Regions
@@ -138,6 +151,34 @@ The validator generates a comprehensive text report (`batch_report.txt` by defau
   - Number of Snyk-supported files found in the repository
   - List of supported files not being tracked by Snyk (potential missing projects)
 
+**Duplicate Projects Section:**
+- Lists duplicate Snyk projects detected within the same target
+- Shows which project to KEEP (newest) and which to REMOVE (stale duplicates)
+- For Maven projects, includes artifactId validation:
+  - Expected artifactId (from project name suffix after ':')
+  - Found artifactId (from pom.xml in repository)
+  - Match status (MATCH/MISMATCH)
+  - Discovered pom.xml paths and their artifactIds
+
+### CSV Duplicate Report
+
+When using the `--duplicates-csv` flag, a CSV file is generated with all duplicate projects in a filterable format. The CSV includes:
+
+- **Action**: KEEP or REMOVE
+- **Unique Identifier**: The part of the project name after ':'
+- **Project Name**: Full Snyk project name
+- **Project ID**: Snyk project UUID
+- **Type**: Project type (maven, npm, etc.)
+- **Created Date**: When the project was created
+- **Org ID**: Snyk organization ID
+- **Project URL**: Direct link to the Snyk project
+- **Expected ArtifactId**: For Maven projects, the expected artifactId
+- **Found ArtifactId**: The actual artifactId found in pom.xml
+- **ArtifactId Match Status**: MATCH or MISMATCH
+- **Reason**: Why the project should be kept or removed
+
+This CSV format makes it easy to filter and sort duplicate projects for review and cleanup.
+
 ## Repository URL Support
 
 ### GitLab URLs
@@ -153,14 +194,6 @@ The validator generates a comprehensive text report (`batch_report.txt` by defau
 - GitHub: `https://github.com/owner/repo`
 - Bitbucket: `https://bitbucket.org/owner/repo`
 
-## How It Works
-
-1. **Fetch Organizations**: Retrieves all accessible Snyk organizations
-2. **Filter Targets**: Uses `source_types=gitlab,cli` to only get relevant targets
-3. **Parse URLs**: Extracts repository information from target URLs
-4. **Validate Files**: Checks if Snyk-tracked files exist in the actual repositories
-5. **Generate Reports**: Creates detailed CSV and text reports
-
 ## Debug Logging
 
 The `--debug` flag enables comprehensive debug logging to help troubleshoot repository mapping issues. When enabled, the script will log:
@@ -171,25 +204,6 @@ The `--debug` flag enables comprehensive debug logging to help troubleshoot repo
 - **File Validation**: Shows which repository each file validation is being performed against
 - **Missing File Detection**: Details about what files are found in repos vs. what Snyk is tracking
 
-Example debug output:
-```
-[14:23:45.123] 🔍 DEBUG: Parsing URL: https://gitlab.com/owner/repo
-[14:23:45.124] 🔍 DEBUG: GitLab pattern 1 match result: True
-[14:23:45.125] 🔍 DEBUG: Successfully parsed URL - Platform: gitlab, Owner: owner, Repo: repo
-[14:23:45.126] 🔍 DEBUG: Repository mapping successful
-[14:23:45.127] 🔍 DEBUG: Mapped to platform: gitlab
-[14:23:45.128] 🔍 DEBUG: API Request - URL: https://api.gitlab.com/api/v4/projects/owner%2Frepo
-```
-
-## Error Handling
-
-The script includes comprehensive error handling for:
-- Invalid repository URLs
-- Network connectivity issues
-- API rate limiting
-- Missing or invalid tokens
-- Repository access permissions
-- File not found errors
 
 ## Use Cases
 
@@ -237,62 +251,16 @@ Identify discrepancies between Snyk project configurations and actual repository
 4. Add tests if applicable
 5. Submit a pull request
 
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Troubleshooting
-
-### Common Issues
-
-#### 404 Organization Not Found
-If you get a 404 error when trying to access an organization:
-
-```bash
-Error validating organization 03c78318-dfc6-4b48-9fd4-76a8254aa225: 404 Client Error: Not Found
-```
-
-This usually means:
-1. **Invalid Organization ID** - The organization ID doesn't exist
-2. **Access Denied** - Your token doesn't have access to this organization
-3. **Organization Deleted** - The organization was deleted or moved
-
-**Solutions:**
-1. **List accessible organizations:**
-   ```bash
-   python3 snyk_sca_validator.py --snyk-token YOUR_TOKEN --list-orgs
-   ```
-
-2. **Use debug mode to see detailed error information:**
-   ```bash
-   python3 snyk_sca_validator.py --snyk-token YOUR_TOKEN --org-id ORG_ID --debug
-   ```
-
-3. **Verify your token has the correct permissions** - Check that your Snyk token has access to the organization you're trying to validate
-
-#### Authentication Issues
-If you get 401 or 403 errors:
-- Verify your Snyk token is valid and not expired
-- Check that your token has the necessary permissions
-- Ensure you're using the correct Snyk region
-
-#### Repository Access Issues
-If repository files can't be accessed:
-- For private GitLab repositories, provide a GitLab token: `--gitlab-token YOUR_GITLAB_TOKEN`
-- For custom GitLab instances, specify the URL: `--gitlab-url https://gitlab.company.com`
-- Use debug mode to see detailed API call information
-
-## Support
-
-For issues and questions:
-1. Check the error messages in the output
-2. Use `--debug` flag for detailed troubleshooting information
-3. Use `--list-orgs` to verify accessible organizations
-4. Verify your API tokens have the correct permissions
-5. Ensure repository URLs are accessible
-6. Check network connectivity and API rate limits
-
 ## Changelog
+
+### Version 2.1
+- Added duplicate project detection based on name patterns
+- Implemented Maven artifactId validation for duplicate projects
+- Added CSV export for duplicate projects (`--duplicates-csv` flag)
+- Added support for processing all organizations in a group (`--group-id`)
+- Added `--skip-org-validation` flag for organizations with validation endpoint issues
+- Improved GitLab API pagination for nested file discovery
+- Enhanced pom.xml discovery with recursive repository scanning
 
 ### Version 2.0
 - Added support for CLI projects

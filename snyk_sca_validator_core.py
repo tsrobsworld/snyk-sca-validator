@@ -63,6 +63,12 @@ class SnykAPI:
         })
         # When true, do not pre-validate org access; proceed directly to targets
         self.skip_org_validation = skip_org_validation
+        
+        # Caching for frequently accessed data
+        self._org_name_cache: Dict[str, str] = {}
+        self._target_url_cache: Dict[str, Optional[str]] = {}
+        self._project_details_cache: Dict[str, Optional[Dict]] = {}
+        self._all_projects_cache: Dict[str, List[Dict]] = {}
     
     def _make_request(self, method: str, url: str, params: Optional[Dict] = None, **kwargs) -> Optional[requests.Response]:
         """
@@ -143,7 +149,7 @@ class SnykAPI:
         
         while True:
             debug_log(f"Group orgs API - URL: {url}, params: {params}, page: {page}", self.debug)
-            resp = self.session.get(url, params=params)
+            resp = self.session.get(url, params=params, timeout=self.timeout)
             debug_log(f"Group orgs API status: {resp.status_code}", self.debug)
             
             if resp.status_code == 200:
@@ -278,7 +284,7 @@ class SnykAPI:
         url = f"{self.base_url}/orgs/{org_id}/targets/{target_id}/projects"
         params = {'version': '2024-10-15'}
         debug_log(f"Projects API URL: {url}, params: {params}", self.debug)
-        resp = self.session.get(url, params=params)
+        resp = self.session.get(url, params=params, timeout=self.timeout)
         debug_log(f"Projects API status: {resp.status_code}", self.debug)
         
         if resp.status_code == 200:
@@ -351,30 +357,42 @@ class SnykAPI:
             return []
     
     def get_all_projects_for_org(self, org_id: str) -> List[Dict]:
-        """Get all projects for an organization"""
+        """Get all projects for an organization (cached)"""
+        if org_id in self._all_projects_cache:
+            debug_log(f"Using cached projects for org: {org_id} ({len(self._all_projects_cache[org_id])} projects)", self.debug)
+            return self._all_projects_cache[org_id]
+        
         debug_log(f"Fetching all projects for org: {org_id}", self.debug)
         url = f"{self.base_url}/orgs/{org_id}/projects"
         params = {'version': '2024-10-15'}
         debug_log(f"All projects API URL: {url}, params: {params}", self.debug)
-        resp = self.session.get(url, params=params)
+        resp = self.session.get(url, params=params, timeout=self.timeout)
         debug_log(f"All projects API status: {resp.status_code}", self.debug)
         
         if resp.status_code == 200:
             data = resp.json()
             projects = data.get('data', [])
             debug_log(f"Found {len(projects)} total projects in org {org_id}", self.debug)
+            self._all_projects_cache[org_id] = projects
             return projects
         else:
             debug_log(f"All projects API error {resp.status_code}: {resp.text}", self.debug)
+            # Cache empty list to avoid repeated failed calls
+            self._all_projects_cache[org_id] = []
             return []
     
     def get_target_url(self, org_id: str, target_id: str) -> Optional[str]:
-        """Get target URL by target ID"""
+        """Get target URL by target ID (cached)"""
+        cache_key = f"{org_id}:{target_id}"
+        if cache_key in self._target_url_cache:
+            debug_log(f"Using cached target URL for: {target_id}", self.debug)
+            return self._target_url_cache[cache_key]
+        
         debug_log(f"Fetching target URL for target: {target_id}", self.debug)
         url = f"{self.base_url}/orgs/{org_id}/targets/{target_id}"
         params = {'version': '2024-10-15'}
         debug_log(f"Target URL API: {url}, params: {params}", self.debug)
-        resp = self.session.get(url, params=params)
+        resp = self.session.get(url, params=params, timeout=self.timeout)
         debug_log(f"Target URL API status: {resp.status_code}", self.debug)
         
         if resp.status_code == 200:
@@ -382,18 +400,24 @@ class SnykAPI:
             target_data = data.get('data', {})
             target_url = target_data.get('attributes', {}).get('url')
             debug_log(f"Target URL: {target_url}", self.debug)
+            self._target_url_cache[cache_key] = target_url
             return target_url
         else:
             debug_log(f"Target URL API error {resp.status_code}: {resp.text}", self.debug)
+            self._target_url_cache[cache_key] = None
             return None
     
     def get_organization_name(self, org_id: str) -> str:
-        """Get organization name by ID"""
+        """Get organization name by ID (cached)"""
+        if org_id in self._org_name_cache:
+            debug_log(f"Using cached organization name for: {org_id}", self.debug)
+            return self._org_name_cache[org_id]
+        
         debug_log(f"Fetching organization name for: {org_id}", self.debug)
         url = f"{self.base_url}/orgs/{org_id}"
         params = {'version': '2024-10-15'}
         debug_log(f"Org name API: {url}, params: {params}", self.debug)
-        resp = self.session.get(url, params=params)
+        resp = self.session.get(url, params=params, timeout=self.timeout)
         debug_log(f"Org name API status: {resp.status_code}", self.debug)
         
         if resp.status_code == 200:
@@ -401,9 +425,12 @@ class SnykAPI:
             org_data = data.get('data', {})
             org_name = org_data.get('attributes', {}).get('name', org_id)
             debug_log(f"Organization name: {org_name}", self.debug)
+            self._org_name_cache[org_id] = org_name
             return org_name
         else:
             debug_log(f"Org name API error {resp.status_code}: {resp.text}", self.debug)
+            # Cache the fallback to avoid repeated failed calls
+            self._org_name_cache[org_id] = org_id
             return org_id  # Fallback to org_id if name can't be fetched
     
     def get_organization_url(self, org_id: str) -> str:
@@ -420,32 +447,45 @@ class SnykAPI:
         return f"https://app.snyk.io/org/{org_slug}/project/{project_id}"
     
     def get_project_details(self, org_id: str, project_id: str) -> Optional[Dict]:
-        """Get detailed information about a specific project"""
+        """Get detailed information about a specific project (cached)"""
+        cache_key = f"{org_id}:{project_id}"
+        if cache_key in self._project_details_cache:
+            debug_log(f"Using cached project details for: {project_id}", self.debug)
+            return self._project_details_cache[cache_key]
+        
         debug_log(f"Fetching project details: {project_id}", self.debug)
         url = f"{self.base_url}/orgs/{org_id}/projects/{project_id}"
-        resp = self.session.get(url)
+        resp = self.session.get(url, timeout=self.timeout)
         debug_log(f"Project details API status: {resp.status_code}", self.debug)
         
         if resp.status_code == 200:
             data = resp.json()
+            project_data = data.get('data')
             debug_log(f"Retrieved project details for {project_id}", self.debug)
-            return data.get('data')
+            self._project_details_cache[cache_key] = project_data
+            return project_data
         else:
             debug_log(f"Project details API error {resp.status_code}: {resp.text}", self.debug)
+            self._project_details_cache[cache_key] = None
             return None
 
 
 class GitLabClient:
     """GitLab API client for repository operations"""
     
-    def __init__(self, token: Optional[str] = None, gitlab_url: str = 'https://gitlab.com', debug: bool = False, verify_ssl: bool = True):
+    def __init__(self, token: Optional[str] = None, gitlab_url: str = 'https://gitlab.com', debug: bool = False, verify_ssl: bool = True, timeout: int = 60):
         self.token = token
         self.gitlab_url = gitlab_url.rstrip('/')
         self.debug = debug
         self.verify_ssl = verify_ssl
+        self.timeout = timeout
         self.session = requests.Session()
         if token:
             self.session.headers.update({'Authorization': f'Bearer {token}'})
+        
+        # Caching for frequently accessed data
+        self._default_branch_cache: Dict[str, str] = {}
+        self._repo_scan_cache: Dict[str, List[Dict]] = {}
     
     def parse_repo_url(self, url: str) -> Optional[Dict]:
         """Parse repository URL and extract platform, host, owner, repo info"""
@@ -521,32 +561,38 @@ class GitLabClient:
         return None
     
     def get_default_branch(self, repo_info: Dict) -> str:
-        """Get default branch for repository"""
+        """Get default branch for repository (cached)"""
         if not repo_info or repo_info.get('platform') != 'gitlab':
             return 'main'
         
-        debug_log(f"Getting default branch for {repo_info.get('owner')}/{repo_info.get('repo')}", self.debug)
-        
         # Use path_with_namespace if available (from GitLab catalog)
         path_with_namespace = repo_info.get('path_with_namespace')
-        if path_with_namespace:
-            url = f"{self.gitlab_url}/api/v4/projects/{path_with_namespace.replace('/', '%2F')}"
-        else:
+        if not path_with_namespace:
             owner = repo_info.get('owner', '')
             repo = repo_info.get('repo', '')
-            url = f"{self.gitlab_url}/api/v4/projects/{owner}%2F{repo}"
+            path_with_namespace = f"{owner}/{repo}"
+        
+        # Check cache
+        if path_with_namespace in self._default_branch_cache:
+            debug_log(f"Using cached default branch for {path_with_namespace}", self.debug)
+            return self._default_branch_cache[path_with_namespace]
+        
+        debug_log(f"Getting default branch for {path_with_namespace}", self.debug)
+        url = f"{self.gitlab_url}/api/v4/projects/{path_with_namespace.replace('/', '%2F')}"
         
         debug_log(f"GitLab API URL: {url}", self.debug)
-        resp = self.session.get(url, verify=self.verify_ssl)
+        resp = self.session.get(url, verify=self.verify_ssl, timeout=self.timeout)
         debug_log(f"GitLab API status: {resp.status_code}", self.debug)
         
         if resp.status_code == 200:
             data = resp.json()
             default_branch = data.get('default_branch', 'main')
             debug_log(f"Default branch: {default_branch}", self.debug)
+            self._default_branch_cache[path_with_namespace] = default_branch
             return default_branch
         else:
             debug_log(f"Could not get default branch, using 'main'", self.debug)
+            self._default_branch_cache[path_with_namespace] = 'main'
             return 'main'
     
     def get_file_content(self, repo_info: Dict, file_path: str, branch: str = None) -> Optional[str]:
@@ -570,7 +616,7 @@ class GitLabClient:
         
         params = {'ref': branch}
         debug_log(f"GitLab file API URL: {url}, params: {params}", self.debug)
-        resp = self.session.get(url, params=params, verify=self.verify_ssl)
+        resp = self.session.get(url, params=params, verify=self.verify_ssl, timeout=self.timeout)
         debug_log(f"GitLab file API status: {resp.status_code}", self.debug)
         
         if resp.status_code == 200:
@@ -609,30 +655,40 @@ class GitLabClient:
         return exists
     
     def scan_repository_for_supported_files(self, repo_info: Dict) -> List[Dict]:
-        """Scan repository for Snyk-supported files"""
+        """Scan repository for Snyk-supported files (cached)"""
         if not repo_info or repo_info.get('platform') != 'gitlab':
             return []
         
-        debug_log(f"Scanning repository for supported files", self.debug)
-        
         # Use path_with_namespace if available (from GitLab catalog)
         path_with_namespace = repo_info.get('path_with_namespace')
+        if not path_with_namespace:
+            owner = repo_info.get('owner', '')
+            repo = repo_info.get('repo', '')
+            path_with_namespace = f"{owner}/{repo}"
+        
+        branch = repo_info.get('branch', 'main')
+        cache_key = f"{path_with_namespace}:{branch}"
+        
+        # Check cache
+        if cache_key in self._repo_scan_cache:
+            debug_log(f"Using cached repo scan for {path_with_namespace} (branch: {branch})", self.debug)
+            return self._repo_scan_cache[cache_key]
+        
+        debug_log(f"Scanning repository for supported files: {path_with_namespace}", self.debug)
+        
         if path_with_namespace:
             url = f"{self.gitlab_url}/api/v4/projects/{path_with_namespace.replace('/', '%2F')}/repository/tree"
         else:
             owner = repo_info.get('owner', '')
             repo = repo_info.get('repo', '')
             url = f"{self.gitlab_url}/api/v4/projects/{owner}%2F{repo}/repository/tree"
-        
-        branch = repo_info.get('branch', 'main')
         params = {'ref': branch, 'recursive': 'true', 'per_page': 100}
         all_files = []
-        page = 1
+        page = 1  # Just for tracking/logging
         
         while True:
-            params['page'] = page
             debug_log(f"GitLab tree API URL: {url}, params: {params}, page: {page}", self.debug)
-            resp = self.session.get(url, params=params, verify=self.verify_ssl)
+            resp = self.session.get(url, params=params, verify=self.verify_ssl, timeout=self.timeout)
             debug_log(f"GitLab tree API status: {resp.status_code}", self.debug)
             
             if resp.status_code != 200:
@@ -646,11 +702,13 @@ class GitLabClient:
             
             all_files.extend(page_files)
             
-            # Check for pagination
+            # Check for pagination - use X-Next-Page header value directly (like build_gitlab_repo_catalog does)
             next_page = resp.headers.get('X-Next-Page')
             if not next_page or next_page == '':
                 break
-            page = int(next_page)
+            # Use the header value directly in params, don't convert to int
+            params['page'] = next_page
+            page += 1  # Just for tracking/logging
         
         files = all_files
         debug_log(f"GitLab tree API returned {len(files)} total files/entries", self.debug)
@@ -718,6 +776,8 @@ class GitLabClient:
                         break
         
         debug_log(f"Found {len(supported_files)} supported files", self.debug)
+        # Cache the result
+        self._repo_scan_cache[cache_key] = supported_files
         return supported_files
 
 

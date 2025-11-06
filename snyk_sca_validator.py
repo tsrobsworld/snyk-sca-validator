@@ -880,7 +880,7 @@ def main():
 
     # Initialize clients
     snyk = SnykAPI(args.snyk_token, args.snyk_region, args.debug, skip_org_validation=args.skip_org_validation, timeout=args.timeout, max_retries=args.max_retries)
-    gitlab = GitLabClient(args.gitlab_token, args.gitlab_url, args.debug, verify_ssl=not args.no_ssl_verify)
+    gitlab = GitLabClient(args.gitlab_token, args.gitlab_url, args.debug, verify_ssl=not args.no_ssl_verify, timeout=args.timeout)
     validator = SCAValidator(snyk, gitlab, args.debug)
 
     # Determine organizations to process

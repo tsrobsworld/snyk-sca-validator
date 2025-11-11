@@ -39,26 +39,27 @@ except Exception as e:
     sys.exit(1)
 
 
-def build_gitlab_repo_catalog(gitlab: GitLabClient, debug: bool = False, timeout: int = 60, max_retries: int = 3) -> Dict[str, Dict]:
+def build_gitlab_repo_catalog(gitlab: GitLabClient, debug: bool = False, timeout: int = 60, max_retries: int = 3, membership_only: bool = False) -> Dict[str, Dict]:
     """
     List GitLab projects the token can access and return a mapping keyed by
     canonical repo key: f"{host}/{full_path}" where full_path is group[/subgroup]/project.
 
     Uses /projects API to get all accessible repositories (including read access).
+    
+    Args:
+        membership_only: If True, only fetch repos where token is a member. Defaults to False (fetch all accessible repos).
     """
     session = gitlab.session
     base = gitlab.gitlab_url.rstrip('/')
     url = f"{base}/api/v4/projects"
-    # If targeting gitlab.com, restrict to membership repos only; for self-hosted, include all accessible
-    host = urlparse(base).netloc
-    is_gitlab_dot_com = host.lower() == 'gitlab.com'
+    
     params = {
         'simple': 'true',
         'archived': 'false',
         'per_page': 100,
         'order_by': 'path'
     }
-    if is_gitlab_dot_com:
+    if membership_only:
         params['membership'] = 'true'
 
     catalog: Dict[str, Dict] = {}
@@ -141,6 +142,143 @@ def build_gitlab_repo_catalog(gitlab: GitLabClient, debug: bool = False, timeout
         params['page'] = next_page
         page += 1
 
+    return catalog
+
+
+def build_matched_gitlab_catalog(
+    gitlab: GitLabClient,
+    snyk_targets_by_key: Dict[str, List[Dict]],
+    debug: bool = False,
+    timeout: int = 60,
+    max_retries: int = 3
+) -> Dict[str, Dict]:
+    """
+    Build GitLab catalog by fetching only repos that are in Snyk targets.
+    This is an optimized approach for large GitLab instances with few Snyk targets.
+    
+    Assumes all Snyk target URLs point to GitLab (validated by caller).
+    Uses --gitlab-url to normalize URLs if needed.
+    
+    Args:
+        gitlab: GitLabClient instance
+        snyk_targets_by_key: Dictionary of Snyk targets keyed by repo key
+        debug: Enable debug logging
+        timeout: HTTP request timeout
+        max_retries: Maximum retry attempts
+    
+    Returns:
+        Dictionary keyed by canonical repo key with GitLab repo metadata
+    """
+    catalog: Dict[str, Dict] = {}
+    session = gitlab.session
+    base = gitlab.gitlab_url.rstrip('/')
+    
+    debug_log(f"Building matched GitLab catalog from {len(snyk_targets_by_key)} Snyk targets", debug)
+    
+    # Extract unique repo keys from Snyk targets
+    repo_keys_to_fetch = set(snyk_targets_by_key.keys())
+    debug_log(f"Fetching {len(repo_keys_to_fetch)} unique GitLab repos", debug)
+    
+    for repo_key in repo_keys_to_fetch:
+        targets = snyk_targets_by_key[repo_key]
+        # Get URL from first target (all targets for same repo should have same URL)
+        target_url = targets[0].get('target_url', '')
+        if not target_url:
+            debug_log(f"Skipping repo {repo_key}: no target URL", debug)
+            continue
+        
+        # Parse the URL to get path_with_namespace
+        repo_info = gitlab.parse_repo_url(target_url)
+        if not repo_info or repo_info.get('platform') != 'gitlab':
+            debug_log(f"Skipping repo {repo_key}: not a GitLab URL ({target_url})", debug)
+            continue
+        
+        # Build path_with_namespace from owner/repo
+        owner = repo_info.get('owner', '')
+        repo = repo_info.get('repo', '')
+        path_with_namespace = f"{owner}/{repo}" if owner else repo
+        
+        # Normalize host to match --gitlab-url if needed
+        target_host = repo_info.get('host', '')
+        gitlab_host = urlparse(base).netloc
+        
+        # If host doesn't match, use the gitlab_url host (assume it's the same instance)
+        if target_host.lower() != gitlab_host.lower():
+            debug_log(f"Normalizing host from {target_host} to {gitlab_host} for repo {path_with_namespace}", debug)
+        
+        # Fetch the specific repo from GitLab
+        url = f"{base}/api/v4/projects/{path_with_namespace.replace('/', '%2F')}"
+        debug_log(f"Fetching GitLab repo: {url} (path: {path_with_namespace})", debug)
+        
+        # Retry logic for network issues
+        repo_data = None
+        for attempt in range(max_retries):
+            try:
+                resp = session.get(url, timeout=(timeout, timeout), verify=gitlab.verify_ssl)
+                
+                # Check for rate limiting
+                if resp.status_code == 429:
+                    retry_after = resp.headers.get('Retry-After', '30')
+                    try:
+                        wait_time = int(retry_after)
+                    except ValueError:
+                        wait_time = 30
+                    debug_log(f"GitLab API rate limited. Waiting {wait_time} seconds...", debug)
+                    import time
+                    time.sleep(wait_time)
+                    continue
+                
+                if resp.status_code == 200:
+                    repo_data = resp.json()
+                    break
+                elif resp.status_code == 404:
+                    debug_log(f"Repo not found: {path_with_namespace} (404)", debug)
+                    break
+                else:
+                    debug_log(f"GitLab API error for {path_with_namespace}: {resp.status_code} - {resp.text[:200]}", debug)
+                    if attempt < max_retries - 1:
+                        wait_time = 2 ** attempt
+                        import time
+                        time.sleep(wait_time)
+                        continue
+                    break
+            except (requests.exceptions.ChunkedEncodingError,
+                    requests.exceptions.ConnectionError,
+                    requests.exceptions.Timeout) as e:
+                wait_time = 2 ** attempt
+                debug_log(f"GitLab API attempt {attempt + 1} failed for {path_with_namespace}: {e}", debug)
+                if attempt < max_retries - 1:
+                    import time
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    debug_log(f"GitLab API failed after {max_retries} attempts for {path_with_namespace}", debug)
+                    break
+        
+        if repo_data:
+            # Build the catalog entry
+            full_path = repo_data.get('path_with_namespace', path_with_namespace)
+            # Use the gitlab_url host for the key (normalized to match --gitlab-url)
+            normalized_key = f"{gitlab_host}/{full_path}"
+            web_url = repo_data.get('web_url', '')
+            
+            catalog[normalized_key] = {
+                'id': repo_data.get('id'),
+                'default_branch': repo_data.get('default_branch', 'main'),
+                'path_with_namespace': full_path,
+                'web_url': web_url,
+                'normalized_web_url': normalize_url_for_matching(web_url) if web_url else ''
+            }
+            debug_log(f"Added GitLab repo to catalog: {normalized_key} (from Snyk key: {repo_key})", debug)
+            
+            # Also add the original repo_key if it's different (for matching flexibility)
+            if normalized_key != repo_key:
+                debug_log(f"  Also mapping original Snyk key {repo_key} to normalized key {normalized_key}", debug)
+                catalog[repo_key] = catalog[normalized_key].copy()  # Same data, different key
+        else:
+            debug_log(f"Failed to fetch GitLab repo: {path_with_namespace} (Snyk key: {repo_key})", debug)
+    
+    debug_log(f"Built matched GitLab catalog with {len(catalog)} repos", debug)
     return catalog
 
 
@@ -864,6 +1002,8 @@ def main():
     parser.add_argument('--snyk-region', default='SNYK-US-01', help='Snyk API region')
     parser.add_argument('--gitlab-token', help='GitLab API token for private repositories')
     parser.add_argument('--gitlab-url', default='https://gitlab.com', help='GitLab instance URL')
+    parser.add_argument('--gitlab-membership-only', action='store_true', help='Only fetch GitLab repos where token is a member (default: fetch all accessible repos)')
+    parser.add_argument('--matched-repos-only', action='store_true', help='Optimized mode: Only fetch GitLab repos that are in Snyk targets. Requires --gitlab-url. Assumes all Snyk target URLs point to GitLab. Focuses on manifest file validation and duplicate Maven project detection.')
     parser.add_argument('--output-report', default='batch_report.txt', help='Output report filename')
     parser.add_argument('--timeout', type=int, default=60, help='HTTP request timeout in seconds (default: 60)')
     parser.add_argument('--max-retries', type=int, default=3, help='Maximum retry attempts for failed requests (default: 3)')
@@ -878,6 +1018,14 @@ def main():
         print("❌ Either --group-id or --org-id must be specified")
         sys.exit(1)
 
+    # Validate --matched-repos-only requirements
+    if args.matched_repos_only:
+        if not args.gitlab_token:
+            print("❌ --matched-repos-only requires --gitlab-token for API access")
+            sys.exit(1)
+        # Note: --gitlab-url defaults to https://gitlab.com which is fine
+        # The user should ensure it matches their Snyk target URLs
+
     # Initialize clients
     snyk = SnykAPI(args.snyk_token, args.snyk_region, args.debug, skip_org_validation=args.skip_org_validation, timeout=args.timeout, max_retries=args.max_retries)
     gitlab = GitLabClient(args.gitlab_token, args.gitlab_url, args.debug, verify_ssl=not args.no_ssl_verify, timeout=args.timeout)
@@ -889,14 +1037,60 @@ def main():
         print("❌ No organizations to process")
         sys.exit(1)
 
-    # Build catalogs
-    print("📚 Building GitLab repository catalog...")
-    gl_catalog = build_gitlab_repo_catalog(gitlab, args.debug, args.timeout, args.max_retries)
-    print(f"   ✅ GitLab repos discovered: {len(gl_catalog)}")
+    # Build catalogs - use optimized workflow if --matched-repos-only is set
+    if args.matched_repos_only:
+        # Optimized workflow: Fetch Snyk targets first, then only fetch matched GitLab repos
+        print("🎯 Collecting Snyk targets...")
+        snyk_catalog = build_snyk_target_catalog(snyk, org_ids, gitlab, args.debug)
+        print(f"   ✅ Snyk target repo references: {len(snyk_catalog)} (unique repos)")
+        
+        # Validate all Snyk target URLs point to GitLab
+        non_gitlab_targets = []
+        for repo_key, targets in snyk_catalog.items():
+            if repo_key == '__CLI_WITHOUT_REPO__':
+                continue
+            for target in targets:
+                target_url = target.get('target_url', '')
+                if target_url:
+                    repo_info = gitlab.parse_repo_url(target_url)
+                    if not repo_info or repo_info.get('platform') != 'gitlab':
+                        non_gitlab_targets.append({
+                            'repo_key': repo_key,
+                            'target_url': target_url,
+                            'target_name': target.get('target_name', '')
+                        })
+        
+        if non_gitlab_targets:
+            print(f"\n❌ Error: --matched-repos-only requires all Snyk target URLs to point to GitLab")
+            print(f"   Found {len(non_gitlab_targets)} non-GitLab target(s):")
+            for nt in non_gitlab_targets[:10]:  # Show first 10
+                print(f"   - {nt['target_name']}: {nt['target_url']}")
+            if len(non_gitlab_targets) > 10:
+                print(f"   ... and {len(non_gitlab_targets) - 10} more")
+            print(f"\n   Use the default workflow (without --matched-repos-only) to handle mixed platforms")
+            sys.exit(1)
+        
+        # Build GitLab catalog from Snyk targets only
+        print("📚 Building GitLab repository catalog (matched repos only)...")
+        gl_catalog = build_matched_gitlab_catalog(gitlab, snyk_catalog, args.debug, args.timeout, args.max_retries)
+        print(f"   ✅ GitLab repos discovered: {len(gl_catalog)} (matched from Snyk targets)")
+        
+        if len(gl_catalog) == 0:
+            print("⚠️  Warning: No GitLab repos were successfully fetched. Check that:")
+            print("   1. Snyk target URLs are correct and point to GitLab")
+            print("   2. --gitlab-url matches the GitLab instance in Snyk target URLs")
+            print("   3. GitLab token has access to the repositories")
+    else:
+        # Default workflow: Fetch all GitLab repos, then match with Snyk
+        print("📚 Building GitLab repository catalog...")
+        # Default: fetch all accessible repos (membership_only=False)
+        # Only restrict to membership if flag is explicitly set
+        gl_catalog = build_gitlab_repo_catalog(gitlab, args.debug, args.timeout, args.max_retries, membership_only=args.gitlab_membership_only)
+        print(f"   ✅ GitLab repos discovered: {len(gl_catalog)}")
 
-    print("🎯 Collecting Snyk targets...")
-    snyk_catalog = build_snyk_target_catalog(snyk, org_ids, gitlab, args.debug)
-    print(f"   ✅ Snyk target repo references: {len(snyk_catalog)} (unique repos)")
+        print("🎯 Collecting Snyk targets...")
+        snyk_catalog = build_snyk_target_catalog(snyk, org_ids, gitlab, args.debug)
+        print(f"   ✅ Snyk target repo references: {len(snyk_catalog)} (unique repos)")
 
     # Evaluate matches
     print("🔗 Joining catalogs and evaluating...")

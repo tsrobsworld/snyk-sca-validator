@@ -6,7 +6,7 @@ A comprehensive tool for validating Snyk SCA (Software Composition Analysis) fil
 
 The validator uses a batch join approach for efficient validation:
 
-1. **Builds a GitLab Repository Catalog**: Lists all accessible GitLab repositories with their metadata (default branch, project path, etc.)
+1. **Builds a GitLab Repository Catalog**: Lists all accessible GitLab repositories with their metadata (default branch, project path, etc.). By default, fetches all accessible repos; use `--gitlab-membership-only` to restrict to membership repos, or `--matched-repos-only` for optimized mode that only fetches repos in Snyk targets.
 2. **Collects Snyk Targets**: Gathers all Snyk targets from specified organizations and normalizes their repository URLs
 3. **Joins the Datasets**: Matches GitLab repositories with Snyk targets using canonical repository keys
 4. **Validates and Reports**: 
@@ -18,6 +18,10 @@ The validator uses a batch join approach for efficient validation:
 ## Features
 
 - **Comprehensive Coverage Analysis**: Identifies matched repos, stale Snyk targets, and untracked GitLab repositories
+- **Flexible GitLab Fetching**: 
+  - Default: Fetches all accessible GitLab repos (complete visibility)
+  - `--gitlab-membership-only`: Restricts to repos where token is a member
+  - `--matched-repos-only`: Optimized mode for large GitLab instances (only fetches repos in Snyk targets)
 - **Detailed Reporting**: Generates comprehensive reports showing:
   - Matched repositories with file validation results
   - Stale Snyk targets (repositories no longer in GitLab)
@@ -80,6 +84,16 @@ Generate CSV report for duplicate projects:
 python3 snyk_sca_validator.py --snyk-token YOUR_SNYK_TOKEN --org-id ORG_ID --duplicates-csv duplicates.csv
 ```
 
+Optimized mode (only fetch repos in Snyk targets):
+```bash
+python3 snyk_sca_validator.py --snyk-token YOUR_SNYK_TOKEN --org-id ORG_ID --gitlab-token YOUR_GITLAB_TOKEN --matched-repos-only
+```
+
+Restrict to membership repos only:
+```bash
+python3 snyk_sca_validator.py --snyk-token YOUR_SNYK_TOKEN --org-id ORG_ID --gitlab-token YOUR_GITLAB_TOKEN --gitlab-membership-only
+```
+
 ### Advanced Usage
 
 Custom GitLab instance:
@@ -112,6 +126,8 @@ python3 snyk_sca_validator.py --snyk-token YOUR_SNYK_TOKEN --debug
 | `--snyk-region` | Snyk API region | No | SNYK-US-01 |
 | `--gitlab-token` | GitLab API token for private repos | No | - |
 | `--gitlab-url` | GitLab instance URL | No | https://gitlab.com |
+| `--gitlab-membership-only` | Only fetch GitLab repos where token is a member (default: fetch all accessible repos) | No | False |
+| `--matched-repos-only` | Optimized mode: Only fetch GitLab repos that are in Snyk targets. Requires --gitlab-token. Assumes all Snyk target URLs point to GitLab. | No | False |
 | `--output-report` | Custom report filename | No | batch_report.txt |
 | `--duplicates-csv` | Generate CSV file with duplicate projects (KEEP and REMOVE) | No | - |
 | `--timeout` | HTTP request timeout in seconds | No | 60 |

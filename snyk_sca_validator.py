@@ -555,72 +555,84 @@ def evaluate_matches(
                 processed_duplicate_ids.add(dup_key)
                 
                 # Add URLs and attempt artifactId validation on pom.xml duplicates
-                duplicate['org_url'] = snyk.get_organization_url(duplicate['org_id'])
-                duplicate['project_url'] = snyk.get_project_url(duplicate['org_id'], duplicate['project_id'])
-                duplicate['newer_project_url'] = snyk.get_project_url(duplicate['org_id'], duplicate['duplicate_of'])
+                try:
+                    duplicate['org_url'] = snyk.get_organization_url(duplicate['org_id'])
+                    duplicate['project_url'] = snyk.get_project_url(duplicate['org_id'], duplicate['project_id'])
+                    duplicate['newer_project_url'] = snyk.get_project_url(duplicate['org_id'], duplicate['duplicate_of'])
+                except Exception as e:
+                    debug_log(f"Warning: Failed to get URLs for duplicate {duplicate.get('project_id')}: {e}", debug)
+                    duplicate['org_url'] = ''
+                    duplicate['project_url'] = ''
+                    duplicate['newer_project_url'] = ''
+                
                 # Maven duplicate validation: compare pom.xml artifactId to second part after ':' in project name
                 if duplicate.get('project_type', '').lower() == 'maven':
-                    # Fetch project details to find file path and root
-                    proj = snyk.get_project_details(duplicate['org_id'], duplicate['project_id'])
-                    attrs = proj.get('attributes', {}) if proj else {}
-                    # Expected artifactId = project name suffix after ':'
-                    expected_artifact = ''
-                    pname = duplicate.get('project_name', '') if 'project_name' in duplicate else attrs.get('name', '')
-                    if ':' in pname:
-                        expected_artifact = pname.split(':', 1)[1].strip()
-                    # Determine file path to pom.xml
-                    file_path = attrs.get('target_file') or attrs.get('file_path') or ''
-                    root = attrs.get('root', '')
-                    # Resolve repo via target URL
-                    target_url = snyk.get_target_url(duplicate['org_id'], duplicate['target_id'])
-                    if target_url:
-                        repo_info = gitlab.parse_repo_url(target_url)
-                        if repo_info and repo_info.get('platform') == 'gitlab':
-                            repo_info = dict(repo_info)
-                            repo_info['path_with_namespace'] = f"{repo_info.get('owner','')}/{repo_info.get('repo','')}".strip('/')
-                            repo_info['branch'] = gitlab.get_default_branch(repo_info)
-                            artifact_check = None
-                            # Strategy:
-                            # 1) If file_path is provided, try it
-                            if file_path:
-                                artifact_check = validator.validate_pom_artifact_id(
-                                    repo_info,
-                                    file_path,
-                                    expected_artifact,
-                                    root
-                                )
-                            # 2) Scan repo for pom.xml and collect all artifactIds
-                            candidates = validator.scan_repository_for_supported_files(repo_info)
-                            pom_candidates = [c['file_path'] for c in (candidates or []) if c['file_path'].lower().endswith('pom.xml')]
-                            debug_log(f"Maven duplicate: found {len(pom_candidates)} pom.xml files in repo for artifactId '{expected_artifact}'", debug)
-                            debug_log(f"  pom.xml paths: {pom_candidates[:10]}", debug)
-                            # Prefer pom.xml whose parent folder name matches expected artifactId
-                            try:
-                                import os as _os
-                                preferred = [p for p in pom_candidates if _os.path.basename(_os.path.dirname(p)).lower() == (expected_artifact or '').lower()]
-                                ordered = preferred + [p for p in pom_candidates if p not in preferred]
-                            except Exception:
-                                ordered = pom_candidates
-                            discovered = []
-                            for candidate in ordered:
-                                content_check = validator.validate_pom_artifact_id(
-                                    repo_info,
-                                    candidate,
-                                    expected_artifact,
-                                    ''
-                                )
-                                discovered.append({'path': candidate, 'artifactId': content_check.get('found_artifact_id')})
-                                # Capture first positive match, otherwise keep the last evaluated
-                                artifact_check = content_check
-                                if content_check.get('artifact_id_match'):
-                                    break
-                            if artifact_check is None:
-                                artifact_check = {'expected_artifact_id': expected_artifact, 'found_artifact_id': None, 'artifact_id_match': False}
-                            duplicate['expected_artifact_id'] = artifact_check.get('expected_artifact_id')
-                            duplicate['found_artifact_id'] = artifact_check.get('found_artifact_id')
-                            duplicate['artifact_id_match'] = artifact_check.get('artifact_id_match')
-                            duplicate['pom_discovered'] = discovered
+                    try:
+                        # Fetch project details to find file path and root
+                        proj = snyk.get_project_details(duplicate['org_id'], duplicate['project_id'])
+                        attrs = proj.get('attributes', {}) if proj else {}
+                        # Expected artifactId = project name suffix after ':'
+                        expected_artifact = ''
+                        pname = duplicate.get('project_name', '') if 'project_name' in duplicate else attrs.get('name', '')
+                        if ':' in pname:
+                            expected_artifact = pname.split(':', 1)[1].strip()
+                        # Determine file path to pom.xml
+                        file_path = attrs.get('target_file') or attrs.get('file_path') or ''
+                        root = attrs.get('root', '')
+                        # Resolve repo via target URL
+                        target_url = snyk.get_target_url(duplicate['org_id'], duplicate['target_id'])
+                        if target_url:
+                            repo_info = gitlab.parse_repo_url(target_url)
+                            if repo_info and repo_info.get('platform') == 'gitlab':
+                                repo_info = dict(repo_info)
+                                repo_info['path_with_namespace'] = f"{repo_info.get('owner','')}/{repo_info.get('repo','')}".strip('/')
+                                repo_info['branch'] = gitlab.get_default_branch(repo_info)
+                                artifact_check = None
+                                # Strategy:
+                                # 1) If file_path is provided, try it
+                                if file_path:
+                                    artifact_check = validator.validate_pom_artifact_id(
+                                        repo_info,
+                                        file_path,
+                                        expected_artifact,
+                                        root
+                                    )
+                                # 2) Scan repo for pom.xml and collect all artifactIds
+                                candidates = validator.scan_repository_for_supported_files(repo_info)
+                                pom_candidates = [c['file_path'] for c in (candidates or []) if c['file_path'].lower().endswith('pom.xml')]
+                                debug_log(f"Maven duplicate: found {len(pom_candidates)} pom.xml files in repo for artifactId '{expected_artifact}'", debug)
+                                debug_log(f"  pom.xml paths: {pom_candidates[:10]}", debug)
+                                # Prefer pom.xml whose parent folder name matches expected artifactId
+                                try:
+                                    import os as _os
+                                    preferred = [p for p in pom_candidates if _os.path.basename(_os.path.dirname(p)).lower() == (expected_artifact or '').lower()]
+                                    ordered = preferred + [p for p in pom_candidates if p not in preferred]
+                                except Exception:
+                                    ordered = pom_candidates
+                                discovered = []
+                                for candidate in ordered:
+                                    content_check = validator.validate_pom_artifact_id(
+                                        repo_info,
+                                        candidate,
+                                        expected_artifact,
+                                        ''
+                                    )
+                                    discovered.append({'path': candidate, 'artifactId': content_check.get('found_artifact_id')})
+                                    # Capture first positive match, otherwise keep the last evaluated
+                                    artifact_check = content_check
+                                    if content_check.get('artifact_id_match'):
+                                        break
+                                if artifact_check is None:
+                                    artifact_check = {'expected_artifact_id': expected_artifact, 'found_artifact_id': None, 'artifact_id_match': False}
+                                duplicate['expected_artifact_id'] = artifact_check.get('expected_artifact_id')
+                                duplicate['found_artifact_id'] = artifact_check.get('found_artifact_id')
+                                duplicate['artifact_id_match'] = artifact_check.get('artifact_id_match')
+                                duplicate['pom_discovered'] = discovered
+                    except Exception as e:
+                        debug_log(f"Warning: Maven validation failed for duplicate {duplicate.get('project_id')}: {e}", debug)
+                        # Continue without artifactId validation - still add the duplicate
                 
+                # Always add the duplicate, even if validation failed
                 results['duplicate_projects'].append(duplicate)
                 debug_log(f"Added duplicate project {duplicate['project_id']} to results", debug)
 
@@ -760,7 +772,21 @@ def render_report(results: Dict) -> str:
     lines.append(f"Snyk-only repos (stale targets): {len(results['snyk_only'])}")
     lines.append(f"GitLab-only repos (no Snyk targets): {len(results['gitlab_only'])}")
     lines.append(f"CLI targets without repo URLs: {len(results.get('cli_without_repo', []))}")
-    lines.append(f"Duplicate projects detected: {len(results.get('duplicate_projects', []))}")
+    
+    # Count duplicate groups and total projects to remove
+    duplicate_projects = results.get('duplicate_projects', [])
+    duplicate_groups_summary = {}
+    for dup in duplicate_projects:
+        key = dup.get('unique_identifier', '')
+        if key not in duplicate_groups_summary:
+            duplicate_groups_summary[key] = 0
+        duplicate_groups_summary[key] += 1
+    total_duplicate_groups = len(duplicate_groups_summary)
+    total_projects_to_remove = len(duplicate_projects)
+    if total_duplicate_groups > 0:
+        lines.append(f"Duplicate groups detected: {total_duplicate_groups} (projects to remove: {total_projects_to_remove})")
+    else:
+        lines.append(f"Duplicate projects detected: 0")
     lines.append("")
 
     lines.append("SNYK-ONLY (NO GITLAB TARGETS FOUND)")

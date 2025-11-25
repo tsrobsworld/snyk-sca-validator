@@ -259,14 +259,6 @@ Identify discrepancies between Snyk project configurations and actual repository
 - `os`: Operating system interface
 - `datetime`: Date and time handling
 
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests if applicable
-5. Submit a pull request
-
 ## Changelog
 
 ### Version 2.1
@@ -292,25 +284,39 @@ Identify discrepancies between Snyk project configurations and actual repository
 
 ## Contributing
 
-We welcome contributions! Please feel free to submit a Pull Request. For major changes, please open an issue first to discuss what you would like to change.
+**This repository is closed to public contributions.**
 
-### Development Setup
+This project is maintained by Snyk and is not accepting external contributions at this time.
 
-1. Fork the repository
-2. Clone your fork: `git clone https://github.com/yourusername/snyk-sca-validator.git`
-3. Install dependencies: `pip install -r requirements.txt`
-4. Create a feature branch: `git checkout -b feature/amazing-feature`
-5. Make your changes and test them
-6. Commit your changes: `git commit -m 'Add some amazing feature'`
-7. Push to the branch: `git push origin feature/amazing-feature`
-8. Open a Pull Request
+### Internal Contributors
 
-### Code Style
+If you are a Snyk employee contributing to this project:
 
-- Follow PEP 8 for Python code
-- Add type hints where appropriate
-- Include docstrings for new functions
-- Add tests for new functionality
+#### Contributor License Agreement (CLA)
+
+All contributors must have a valid Contributor License Agreement (CLA) on file with Snyk. This protects both the contributor and Snyk's intellectual property.
+
+#### Development Workflow
+
+1. Fork the repo and create your branch from `main`.
+2. If you've added code that should be tested, add tests.
+3. If you've changed APIs, update the documentation.
+4. Ensure the test suite passes.
+5. Make sure your code lints.
+6. Issue that pull request!
+
+#### Code Standards
+
+- Follow the existing code style
+- Add appropriate tests for new functionality
+- Update documentation for any API changes
+- Ensure all tests pass before submitting
+
+### Reporting Issues
+
+For internal issue reporting and tracking, please use the project's issue tracker.
+
+For security issues, please follow the process outlined in [SECURITY.md](SECURITY.md).
 
 ## License
 
